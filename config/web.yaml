@@ -1,0 +1,15 @@
+ # ---------------------------------------------------------------------------- #
+ #                      Config for PointerCAD Model Training                      #
+ # ---------------------------------------------------------------------------- #
+ 
+ 
+ 
+ # ---------------------- Configuration for Model ---------------------- #
+model:
+  base_model: "Qwen/Qwen2.5-7B-Instruct"
+
+
+# ------------------------- Test configuration ------------------------- #
+web:
+  log_dir: "./log"
+  checkpoint_path: "/mnt/afs_01e/mayi-folder/ParamCAD/cad/ParamCAD/plan-param-tie-mask/log/2026-02-11/11:19/model.pth"

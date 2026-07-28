@@ -1,0 +1,79 @@
+ # ---------------------------------------------------------------------------- #
+ #                      Config for PointerCAD Model Training                      #
+ # ---------------------------------------------------------------------------- #
+ 
+ 
+ 
+ # ---------------------- Configuration for Model ---------------------- #
+model:
+  base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+
+
+# --------------- Configuration related to training dataloader --------------- #
+dataset:
+  # Root directory of the dataset
+  dataset_dir: "/mnt/afs_01e/mayi-folder/ParamCAD/dataset/paramcad-addon"
+  # JSON file containing information about train, test, and validation splits
+  split_filepath: "/mnt/afs_01e/mayi-folder/ParamCAD/dataset/paramcad-addon/train_val_test.json"
+  # Prompt level choices
+  prompt:
+    - exp
+
+
+# --------------------- Configuration related to training -------------------- #
+train:
+  # Learning rate for training
+  lr: 0.0001
+  tau_lr: 0.00001
+  # Weight decay for optimizer
+  weight_decay: 0.01
+  # Batch size for training (auto grad accumulation)
+  batch_size: 4
+  # Number of generations per Prompt
+  num_generations: 12
+  # Generation number used simoultaneously
+  grad_accum_steps: 6
+  # Number of iterations for training
+  num_iterations: 4000
+  reference_update_interval: 50
+  # Number of workers for the DataLoader during training
+  num_workers: 4
+  # Prefetch factor for the DataLoader during training
+  prefetch_factor: 16
+  # Directory for logging training information
+  log_dir: "./log"
+  # Path to saved model checkpoint for Resuming Training (optional)
+  # 10 epoch: /mnt/afs_01e/mayi-folder/ParamCAD/cad/ParamCAD/plan-param-tie/log/2025-10-23/04:08/model.pth
+  # 1  epoch: /mnt/afs_01e/mayi-folder/ParamCAD/cad/ParamCAD/plan-param-tie/log/2026-01-06/02:59/model.pth
+  checkpoint_path: "/home/terbium/PointerCADv2-RL/log/sft-checkpoints/addon-0.5B-model.pth"
+  # Checkpoint interval
+  checkpoint_interval: 25
+  # KL Divergence penalty coefficient
+  beta: 0.1
+  # Weights for different components of the reward function
+  reward_weight:
+    valid: 1.0
+    chamfer_distance: 2.0
+    length: 0.1
+    accuracy: 10.0
+    accuracy_weight:
+      vertex: 0.6
+      edge: 0.2
+      face: 0.2
+  # Temperature for sampling during training
+  temperature:
+    plan: 1.0
+    label: 0.5
+    parameter: 0.5
+    pointer: 0.5
+
+
+# ------------------------- Validation configuration ------------------------- #
+val:
+  val_batch: 5
+  interval: 1
+  batch_size: 16
+
+
+# --------------- Additional information (leave empty for now) --------------- #
+info: "test"

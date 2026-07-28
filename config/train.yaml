@@ -1,0 +1,69 @@
+ # ---------------------------------------------------------------------------- #
+ #                      Config for PointerCAD Model Training                      #
+ # ---------------------------------------------------------------------------- #
+
+
+
+ # ---------------------- Configuration for Model ---------------------- #
+model:
+  base_model: "Qwen/Qwen2.5-7B-Instruct"
+
+
+# --------------- Configuration related to training dataloader --------------- #
+dataset:
+  # Root directory of the dataset
+  dataset_dir: "/mnt/afs_01e/mayi-folder/ParamCAD/dataset/paramcad/dataset"
+  # JSON file containing information about train, test, and validation splits
+  split_filepath: "/mnt/afs_01e/mayi-folder/ParamCAD/dataset/paramcad/train_val_test.json"
+  # Prompt level choices
+  prompt:
+    - abs
+    - exp
+
+
+# --------------------- Configuration related to training -------------------- #
+train:
+  # Learning rate for training
+  lr: 0.0001
+  tau_lr: 0.00001
+  # Weight decay for optimizer
+  weight_decay: 0.01
+  # Batch size for training
+  batch_size: 2
+  # Gradient accumulation steps to simulate larger batch sizes
+  gradient_accumulation_steps: 8
+  # Number of epochs for training
+  num_epochs: 10
+  # Number of workers for the DataLoader during training
+  num_workers: 4
+  # Prefetch factor for the DataLoader during training
+  prefetch_factor: 16
+  # Directory for logging training information
+  log_dir: "./log"
+  # Overwrite existing checkpoints 
+  checkpoint_overwrite: True
+  # Path to saved model checkpoint for Resuming Training (optional)
+  checkpoint_path: # "/public/home/qidacheng/workspace/cad/CADv2/pointer_npad_clip/log/2025-05-22/16:56/model.pth" # Set to None if no checkpoint is available
+  force_retrain: True # Set to True if you want to retrain the model even if a checkpoint is available
+  # Checkpoint interval
+  checkpoint_interval: 1
+
+
+# --------------------- Configuration related to criterion -------------------- #
+criterion:
+  weights:
+    logits: 0.2
+    label: 0.3
+    parameter: 0.2
+    pointer: 0.3
+
+
+# ------------------------- Validation configuration ------------------------- #
+val:
+  val_batch: 10
+  interval: 5
+  batch_size: 16
+
+
+# --------------- Additional information (leave empty for now) --------------- #
+info: "test"

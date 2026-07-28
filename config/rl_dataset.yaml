@@ -1,0 +1,11 @@
+# Source PointerCAD data remains authoritative. This builder only materializes
+# a full-episode index under format/pointercad_rl/episodes.
+source:
+  name: "paramcad-addon"
+  dataset_dir: "/mnt/afs_01e/mayi-folder/ParamCAD/dataset/paramcad-addon/dataset-addon"
+  split_filepath: "/mnt/afs_01e/mayi-folder/ParamCAD/dataset/paramcad-addon/train_val_test_addon.json"
+  prompt_variants:
+    - exp
+
+output_root: "/home/terbium/datasets/paramcad-addon/format/pointercad-rl"
+preprocessing_version: "episode-index-v1"

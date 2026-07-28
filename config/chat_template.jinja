@@ -1,0 +1,26 @@
+{% if messages and messages[0]['role'] != 'system' %}
+<|im_start|>system
+You are a helpful assistant.<|im_end|>
+{% endif -%}
+
+{%- for message in messages %}
+<|im_start|>{{ message['role'] }}
+    {% for content in message['content'] -%}
+        {% if content.type == 'brep' -%}
+<|brep_edge_start|><|brep_edge_pad|><|brep_edge_end|><|brep_face_start|><|brep_face_pad|><|brep_face_end|>
+        {%- elif content.type == 'cad' -%}
+<|cad_start|><|cad_pad|><|cad_end|>
+        {%- elif content.type == 'text' -%}
+{{ content.text }}
+        {%- endif %}
+    {% endfor -%}
+<|im_end|>
+{%- if not loop.last %}
+
+{% endif -%}
+{%- endfor -%}
+
+{%- if add_generation_prompt %}
+
+<|im_start|>assistant
+{% endif -%}

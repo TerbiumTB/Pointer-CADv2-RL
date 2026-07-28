@@ -1,0 +1,26 @@
+episodes_root: "/home/terbium/datasets/paramcad-addon/format/pointercad-rl/episodes"
+rollout_root: "/home/terbium/datasets/paramcad-addon/format/pointercad-rl/rollouts/sft-05b-k5"
+output_root: "/home/terbium/datasets/paramcad-addon/format/pointercad-rl/preferences/geometry-v1"
+
+reward:
+  version: "geometry-v1"
+  invalid_penalty: -10.0
+  valid_bonus: 0.0
+  weights:
+    iou: 5.0
+    chamfer_distance: 1.0
+    vertex_accuracy: 1.0
+    edge_accuracy: 2.0
+    face_accuracy: 2.0
+  directions:
+    iou: 1.0
+    chamfer_distance: -1.0
+    vertex_accuracy: 1.0
+    edge_accuracy: 1.0
+    face_accuracy: 1.0
+
+pairing:
+  strategy: "all_pairs"
+  min_reward_margin: 0.5
+  max_pairs_per_task: 5
+  seed: 0
