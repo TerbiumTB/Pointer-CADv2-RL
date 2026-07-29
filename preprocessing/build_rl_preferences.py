@@ -1,7 +1,3 @@
-"""CLI for deriving preferred/rejected pairs from a frozen rollout store."""
-
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 from typing import Dict, List
@@ -39,6 +35,8 @@ def main() -> None:
 
     trajectories_by_split = {"train": [], "validation": []}
     for trajectory in load_trajectories(config["rollout_root"]):
+        if trajectory.num_generated_steps == 0:
+            continue
         split = task_splits.get(trajectory.task_id)
         if split is not None:
             trajectories_by_split[split].append(trajectory)

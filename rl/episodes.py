@@ -1,7 +1,3 @@
-"""Build a full-episode index from PointerCAD's step-level source split."""
-
-from __future__ import annotations
-
 import json
 from collections import defaultdict
 from pathlib import Path

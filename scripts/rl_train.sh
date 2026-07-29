@@ -1,4 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+set -o pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
 
 source /root/miniconda3/etc/profile.d/conda.sh
 conda activate pointercad
@@ -78,5 +84,5 @@ fi
 # -----------------------------
 # Launch training
 # -----------------------------
-echo -e "${BLUE}Running python ./rl_train.py${NC}"
-python -u ./rl_train.py 2>&1 | tee ./rl_train.${NODE_RANK}.$(date +"%Y%m%d_%H%M%S").log
+echo -e "${BLUE}Running python $REPO_ROOT/rl_train.py${NC}"
+python -u "$REPO_ROOT/rl_train.py" 2>&1 | tee "$REPO_ROOT/rl_train.${NODE_RANK}.$(date +"%Y%m%d_%H%M%S").log"

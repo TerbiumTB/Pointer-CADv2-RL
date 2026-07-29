@@ -1,0 +1,51 @@
+run_id: "sft-05b-k5"
+generator_version: "rollout-generator-v1"
+episodes_root: "/home/terbium/datasets/paramcad-addon/format/pointercad-rl/episodes"
+source_dataset_root: "/mnt/afs_01e/mayi-folder/ParamCAD/dataset/paramcad-addon/dataset-addon"
+output_root: "/home/terbium/datasets/paramcad-addon/format/pointercad-rl/rollouts"
+splits:
+  - train
+  - validation
+
+model:
+  base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+  checkpoint_path: "/path/to/sft/model.pth"
+  device: "cuda"
+  dtype: "bfloat16"
+
+generation:
+  trajectories_per_episode: 5
+  base_seed: 0
+  max_episode_steps: 64
+  max_generation_steps: 1024
+  max_input_length: 3072
+  write_shard_size: 64
+  max_episodes_per_split: null
+  task_ids: null
+  resume: false
+  temperatures:
+    plan: 1.0
+    label: 1.0
+    parameter: 1.0
+    pointer: 1.0
+
+execution:
+  strict: true
+  build_timeout_seconds: 300.0
+  surf_u_samples: 32
+  surf_v_samples: 32
+  curv_u_samples: 32
+
+metrics:
+  version: "geometry-raw-v1"
+  enabled:
+    - iou
+    - chamfer_distance
+    - accuracy
+    - f1
+    - watertight
+  chamfer_points: 8192
+
+outputs:
+  save_step: true
+  save_mesh: true

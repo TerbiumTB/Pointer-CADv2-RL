@@ -1,4 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
 
 source /root/miniconda3/etc/profile.d/conda.sh
 conda activate pointercad
@@ -48,5 +52,5 @@ fi
 
 source ~/proxy.sh
 
-echo -e "${BLUE}Running python ./train.py${NC}"
-python ./train.py
+echo -e "${BLUE}Running python $REPO_ROOT/train.py${NC}"
+python "$REPO_ROOT/train.py"

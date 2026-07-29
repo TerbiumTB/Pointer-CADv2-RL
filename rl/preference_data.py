@@ -1,7 +1,3 @@
-"""Reward composition used when materializing preferred/rejected views."""
-
-from __future__ import annotations
-
 from typing import Any, Dict, Tuple
 
 from rl.preference_view import build_preference_records, write_preference_view

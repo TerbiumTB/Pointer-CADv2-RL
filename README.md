@@ -27,7 +27,7 @@ conda create --name pointercad-rl --clone pointercad
 
 ---
 
-## Usage Instructions Based on `train.sh`
+## Usage Instructions Based on `scripts/train.sh`
 
 ### Prerequisites and Setup
 
@@ -43,7 +43,7 @@ conda create --name pointercad-rl --clone pointercad
 
   The training script sources this file to configure distributed environment variables.
 
-* `train.sh` attempts to source the following proxy script:
+* `scripts/train.sh` attempts to source the following proxy script:
 
   ```bash
   ~/cluster/set_proxy.sh
@@ -54,7 +54,7 @@ conda create --name pointercad-rl --clone pointercad
 * Make the script executable:
 
   ```bash
-  chmod +x train.sh
+  chmod +x scripts/train.sh
   ```
 
 ### Script Behavior Overview
@@ -64,13 +64,13 @@ conda create --name pointercad-rl --clone pointercad
 Run:
 
 ```bash
-./train.sh --test
+./scripts/train.sh --test
 ```
 
 or:
 
 ```bash
-./train.sh -t
+./scripts/train.sh -t
 ```
 
 The script sets the following variables:
@@ -100,13 +100,13 @@ If the file does not exist, the script exits with an error.
 Local quick debugging:
 
 ```bash
-./train.sh --test
+./scripts/train.sh --test
 ```
 
 Running in a prepared cluster environment:
 
 ```bash
-./train.sh
+./scripts/train.sh
 ```
 
 At the end, the script runs:
@@ -120,7 +120,7 @@ python ./train.py
 
 ## Helper Scripts
 
-### `set_proxy.sh`
+### `scripts/set_proxy.sh`
 
 ```bash
 #!/usr/bin/env bash

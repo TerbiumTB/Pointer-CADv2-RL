@@ -1,7 +1,3 @@
-"""Parquet and YAML persistence helpers for RL-derived data."""
-
-from __future__ import annotations
-
 import os
 import uuid
 from pathlib import Path
@@ -77,6 +73,7 @@ def parquet_schema(record_type: Type[Any]):
                 ("trajectory_id", pa.string()),
                 ("step_index", pa.int32()),
                 ("state_before_id", pa.string()),
+                ("state_before_graph_path", pa.string()),
                 ("state_after_id", pa.string()),
                 ("plan_text", pa.string()),
                 ("plan_token_ids", pa.list_(pa.int64())),
@@ -166,6 +163,14 @@ def write_yaml(path: Path, value: Dict[str, Any]) -> None:
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def read_yaml(path: Path) -> Dict[str, Any]:
+    with Path(path).open("r", encoding="utf-8") as file:
+        value = yaml.safe_load(file)
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected a YAML object in {path}.")
+    return value
 
 
 def next_part_path(directory: Path) -> Path:

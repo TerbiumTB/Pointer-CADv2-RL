@@ -241,6 +241,7 @@ class PointerCAD(nn.Module):
         temperature_pointer=1.0,
         max_steps: int = MAX_GENERATION_LENGTH,
         mode="argmax", # can be "argmax" or "sample"
+        return_log_probs=False,
         **kwargs
     ):
         assert mode in ["argmax", "sample"], f"Invalid mode: {mode}. Must be 'argmax' or 'sample'."
@@ -254,6 +255,10 @@ class PointerCAD(nn.Module):
         generated_label = [torch.zeros((0), dtype=input_ids.dtype, device=input_ids.device) for _ in range(batch_size)]
         generated_parameter = [torch.zeros((0), dtype=input_ids.dtype, device=input_ids.device) for _ in range(batch_size)]
         generated_pointer = [torch.zeros((0), dtype=input_ids.dtype, device=input_ids.device) for _ in range(batch_size)]
+        behavior_log_probs = [
+            {"plan": [], "label": [], "parameter": [], "pointer": []}
+            for _ in range(batch_size)
+        ]
         past_key_values = None
 
         text_embeds: torch.Tensor = self.model.get_input_embeddings()(generated_ids)
@@ -310,13 +315,37 @@ class PointerCAD(nn.Module):
 
                 if generated_ids[idx][-1] == 151671 or ((generated_ids[idx][-1] == 151673) and (generated_label[idx][-1] != TOKEN.index("<|model_end|>")) and (generated_label[idx][-1] != TOKEN.index("<|part_end|>"))):
                     # is CAD generation step
+                    label_logits = self.label_head(hidden_states[idx])
                     if mode == "sample":
-                        logits = self.label_head(hidden_states[idx]) / temperature_label
+                        label_logits = label_logits.clone()
+                        parameter_map = param_embeds[idx]
+                        if parameter_map is None or parameter_map["length"].shape[0] == 0:
+                            label_logits[TOKEN.index("<|length_value|>")] = -1e9
+                        if parameter_map is None or parameter_map["angle"].shape[0] == 0:
+                            label_logits[TOKEN.index("<|angle_value|>")] = -1e9
+                        if generated_ids[idx][-1] == 151671:
+                            label_logits[TOKEN.index("<|pointer_enable|>")] = -1e9
+                        elif (
+                            generated_label[idx][-1] != TOKEN.index("<|sketch_start|>")
+                            and pointer_crv[idx].shape[0] == 0
+                        ):
+                            label_logits[TOKEN.index("<|pointer_enable|>")] = -1e9
+                        logits = label_logits / temperature_label
                         logits = logits - torch.max(logits)
                         logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
-                        pred_label = torch.multinomial(F.softmax(logits, dim=0), num_samples=1).squeeze(0)
+                        label_probabilities = F.softmax(logits, dim=0)
+                        pred_label = torch.multinomial(label_probabilities, num_samples=1).squeeze(0)
                     else:
-                        pred_label = torch.argmax(self.label_head(hidden_states[idx]), dim=0)
+                        logits = label_logits / temperature_label
+                        pred_label = torch.argmax(label_logits, dim=0)
+
+                    selected_label_logp = F.log_softmax(logits, dim=0)[pred_label]
+                    selected_parameter_logp = torch.tensor(
+                        0.0, device=input_ids.device
+                    )
+                    selected_pointer_logp = torch.tensor(
+                        0.0, device=input_ids.device
+                    )
 
                     if pred_label in [TOKEN.index("<|length_value|>"), TOKEN.index("<|angle_value|>")]:
                         pred_parameter: torch.Tensor = self.parameter_head(hidden_states[idx])
@@ -337,6 +366,9 @@ class PointerCAD(nn.Module):
                                     logits = logits - torch.max(logits)
                                     logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
                                     pred_parameter = torch.multinomial(F.softmax(logits, dim=0), num_samples=1).squeeze(0) + 1  # +1 for 1-based index
+                                selected_parameter_logp = F.log_softmax(
+                                    sim_length / temperature_parameter, dim=0
+                                )[pred_parameter - 1]
                         else:
                             pred_angle = F.normalize(pred_parameter, p=2, dim=0, eps=1e-6)
                             cand_angle = F.normalize(param_embeds[idx]["angle"], p=2, dim=1, eps=1e-6).type_as(pred_angle)
@@ -353,6 +385,9 @@ class PointerCAD(nn.Module):
                                     logits = logits - torch.max(logits)
                                     logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
                                     pred_parameter = torch.multinomial(F.softmax(logits, dim=0), num_samples=1).squeeze(0) + 1  # +1 for 1-based index
+                                selected_parameter_logp = F.log_softmax(
+                                    sim_angle / temperature_parameter, dim=0
+                                )[pred_parameter - 1]
                     else:
                         pred_parameter = torch.tensor(-len(STANDARD_PLANES) - 1, dtype=generated_parameter[idx].dtype, device=generated_parameter[idx].device)
 
@@ -369,6 +404,9 @@ class PointerCAD(nn.Module):
                                 logits = logits - torch.max(logits)
                                 logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
                                 index = torch.multinomial(F.softmax(logits, dim=0), num_samples=1).squeeze(0)
+                            selected_pointer_logp = F.log_softmax(
+                                cos_sim / temperature_pointer, dim=0
+                            )[index]
                             pred_pointer = index - len(STANDARD_PLANES)
                         else:
                             if pointer_crv[idx].shape[0] > 0:
@@ -381,6 +419,9 @@ class PointerCAD(nn.Module):
                                     logits = logits - torch.max(logits)
                                     logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
                                     pred_pointer = torch.multinomial(F.softmax(logits, dim=0), num_samples=1).squeeze(0)
+                                selected_pointer_logp = F.log_softmax(
+                                    cos_sim / temperature_pointer, dim=0
+                                )[pred_pointer]
                             else:
                                 pred_pointer = torch.tensor(-len(STANDARD_PLANES) - 1, dtype=generated_pointer[idx].dtype, device=generated_pointer[idx].device)
                                 pred_label = torch.tensor(TOKEN.index("<|pointer_disable|>"), dtype=pred_label.dtype, device=pred_label.device)
@@ -392,6 +433,15 @@ class PointerCAD(nn.Module):
                     generated_label[idx] = torch.cat([generated_label[idx], pred_label.unsqueeze(0)])
                     generated_parameter[idx] = torch.cat([generated_parameter[idx], pred_parameter.unsqueeze(0)])
                     generated_pointer[idx] = torch.cat([generated_pointer[idx], pred_pointer.unsqueeze(0)])
+                    behavior_log_probs[idx]["label"].append(
+                        float(selected_label_logp.item())
+                    )
+                    behavior_log_probs[idx]["parameter"].append(
+                        float(selected_parameter_logp.item())
+                    )
+                    behavior_log_probs[idx]["pointer"].append(
+                        float(selected_pointer_logp.item())
+                    )
                     generated_ids_list[idx] = 151673
                 else:
                     # is LM generation step
@@ -418,6 +468,9 @@ class PointerCAD(nn.Module):
                     if pred_id == 151671 and param_embeds[idx] is not None: pred_id = 151643  # <|cad_start|> token appear twice handling
 
                     generated_ids_list[idx] = pred_id.item() if torch.is_tensor(pred_id) else pred_id
+                    behavior_log_probs[idx]["plan"].append(
+                        float(F.log_softmax(pred_logit / temperature_lm, dim=0)[pred_id].item())
+                    )
                     if pred_id in [151643, 151645]:
                         finish_mark[idx] = True
 
@@ -469,7 +522,16 @@ class PointerCAD(nn.Module):
             generated_mask_pad = torch.ones((batch_size, generated_ids.shape[1] - generated_mask.shape[1]), device=generated_mask.device, dtype=generated_mask.dtype)
             generated_mask = torch.cat([generated_mask, generated_mask_pad], dim=-1)
 
-        return generated_ids[:, seq_length:], parameter_maps, generated_label, generated_parameter, generated_pointer
+        result = (
+            generated_ids[:, seq_length:],
+            parameter_maps,
+            generated_label,
+            generated_parameter,
+            generated_pointer,
+        )
+        if return_log_probs:
+            return (*result, behavior_log_probs)
+        return result
 
     def get_param_groups(self, base_lr: float, tau_lr: float, weight_decay: float):
         other_params, tau_params = [], []

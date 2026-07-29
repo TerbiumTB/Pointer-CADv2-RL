@@ -7,8 +7,8 @@
 # 等典型分布式训练变量。
 #
 # 使用示例：
-#   ./kill_leaked_torch_spawn.sh           # 交互确认后清理
-#   ./kill_leaked_torch_spawn.sh --yes     # 直接清理不询问
+#   ./scripts/kill_leaked_ddp.sh           # 交互确认后清理
+#   ./scripts/kill_leaked_ddp.sh --yes     # 直接清理不询问
 #
 # 注意：
 #   - 只清理当前用户的进程

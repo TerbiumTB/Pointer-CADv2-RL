@@ -1,0 +1,47 @@
+name: pointercad-rl-local
+
+channels:
+  - conda-forge
+  - nodefaults
+
+dependencies:
+  - python=3.9
+  - pip
+
+  # CPU-compatible ML stack. No CUDA runtime or FlashAttention is installed.
+  - pytorch
+  - dgl
+  # DGL 2.x still imports the DataPipes API removed in torchdata 0.9.
+  - torchdata<0.9
+  - transformers
+  - peft
+
+  - datasets
+  - accelerate
+  - pyarrow
+
+  # CAD and geometry stack.
+  - pythonocc-core
+  - opencv
+  - trimesh
+  - scipy
+  - numpy
+  - scikit-learn
+  - simpleeval
+
+  # Application, evaluation, and utility dependencies.
+  - pandas
+  - pyyaml
+  - requests
+  - fastapi
+  - uvicorn
+  - pydantic
+  - gradio
+  - loguru
+  - rich
+  - tqdm
+  - wandb
+
+  - pip:
+      - pyDeprecate
+      - git+https://github.com/AutodeskAILab/occwl.git

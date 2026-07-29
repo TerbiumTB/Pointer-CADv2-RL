@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+
+# Source this file to export the proxy variables in the current shell.
 DEFAULT_PROXY="http://10.10.10.102:7999"
 export http_proxy="$DEFAULT_PROXY"
 export https_proxy="$DEFAULT_PROXY"

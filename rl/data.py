@@ -1,7 +1,3 @@
-"""Read-only accessors for episode, rollout and preference datasets."""
-
-from __future__ import annotations
-
 from collections import defaultdict
 from pathlib import Path
 from typing import DefaultDict, Dict, List
@@ -27,7 +23,15 @@ def load_trajectories(rollout_root: str) -> List[TrajectoryRecord]:
 
 
 def load_steps(rollout_root: str) -> List[StepRecord]:
-    return read_parquet_dataset(Path(rollout_root) / "steps", StepRecord)
+    root = Path(rollout_root)
+    records: List[StepRecord] = []
+    for trajectory_path in sorted(
+        (root / "trajectories").glob("part-*.parquet")
+    ):
+        step_path = root / "steps" / trajectory_path.name
+        if step_path.exists():
+            records.extend(read_parquet(step_path, StepRecord))
+    return records
 
 
 def load_scores(rollout_root: str) -> List[ScoreRecord]:

@@ -1,16 +1,12 @@
-from __future__ import annotations
-
 import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 from rl.schemas import ScoreRecord, StepRecord, TrajectoryRecord
-from rl.storage import next_part_path, write_parquet, write_yaml
+from rl.storage import next_part_path, read_yaml, write_parquet, write_yaml
 
 
 class RolloutStore:
-    """A rollout run containing summaries, steps, scores and heavy data files."""
-
     def __init__(self, root: Path):
         self.root = Path(root)
         self.trajectories_dir = self.root / "trajectories"
@@ -37,7 +33,15 @@ class RolloutStore:
             store.state_data_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
-        write_yaml(store.root / "config.yaml", config)
+        config_path = store.root / "config.yaml"
+        if config_path.exists():
+            existing_config = read_yaml(config_path)
+            if existing_config != config:
+                raise ValueError(
+                    f"Cannot resume rollout store with a different config: {store.root}"
+                )
+        else:
+            write_yaml(config_path, config)
         return store
 
     def append(
@@ -46,17 +50,30 @@ class RolloutStore:
         steps: Sequence[StepRecord],
         scores: Sequence[ScoreRecord] = (),
     ) -> None:
-        """Write one immutable Parquet shard per supplied record group."""
-        if trajectories:
-            write_parquet(
-                next_part_path(self.trajectories_dir),
-                trajectories,
-                TrajectoryRecord,
-            )
+        if not trajectories:
+            if steps:
+                raise ValueError("Cannot append steps without trajectories.")
+            if scores:
+                write_parquet(
+                    next_part_path(self.scores_dir), scores, ScoreRecord
+                )
+            return
+
+        trajectory_path = next_part_path(self.trajectories_dir)
+        shard_name = trajectory_path.name
         if steps:
-            write_parquet(next_part_path(self.steps_dir), steps, StepRecord)
+            write_parquet(
+                self.steps_dir / shard_name, steps, StepRecord
+            )
         if scores:
-            write_parquet(next_part_path(self.scores_dir), scores, ScoreRecord)
+            write_parquet(
+                self.scores_dir / shard_name, scores, ScoreRecord
+            )
+        write_parquet(
+            trajectory_path,
+            trajectories,
+            TrajectoryRecord,
+        )
 
     def add_data_file(
         self,
@@ -64,7 +81,16 @@ class RolloutStore:
         category: str,
         relative_name: Optional[str] = None,
     ) -> str:
-        """Copy a generated heavy object into data/ and return its store path."""
+        destination = self.new_data_path(
+            category, relative_name or Path(source).name
+        )
+        source = Path(source)
+        if not source.is_file():
+            raise FileNotFoundError(source)
+        shutil.copy2(source, destination)
+        return destination.relative_to(self.root).as_posix()
+
+    def new_data_path(self, category: str, relative_name: str) -> Path:
         category_dirs = {
             "cad": self.cad_data_dir,
             "mesh": self.mesh_data_dir,
@@ -77,10 +103,6 @@ class RolloutStore:
                 f"Unknown data category {category!r}; expected cad, mesh or states."
             ) from exc
 
-        source = Path(source)
-        if not source.is_file():
-            raise FileNotFoundError(source)
-        relative_name = relative_name or source.name
         relative_path = Path(relative_name)
         if relative_path.is_absolute() or ".." in relative_path.parts:
             raise ValueError("relative_name must stay inside the selected data directory.")
@@ -88,5 +110,25 @@ class RolloutStore:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
             raise FileExistsError(destination)
-        shutil.copy2(source, destination)
-        return destination.relative_to(self.root).as_posix()
+        return destination
+
+    def relative_path(self, path: Path) -> str:
+        path = Path(path).absolute()
+        root = self.root.absolute()
+        try:
+            return path.relative_to(root).as_posix()
+        except ValueError as exc:
+            raise ValueError(f"Path is outside rollout store: {path}") from exc
+
+    def discard_uncommitted_data(self, trajectory_id: str) -> None:
+        if not trajectory_id or Path(trajectory_id).name != trajectory_id:
+            raise ValueError(f"Unsafe trajectory ID: {trajectory_id!r}")
+        state_directory = self.state_data_dir / trajectory_id
+        if state_directory.exists():
+            shutil.rmtree(state_directory)
+        for path in (
+            self.cad_data_dir / f"{trajectory_id}.step",
+            self.mesh_data_dir / f"{trajectory_id}.stl",
+        ):
+            if path.exists():
+                path.unlink()

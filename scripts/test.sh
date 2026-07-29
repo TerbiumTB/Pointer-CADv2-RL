@@ -1,4 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
 
 # Set port number and program variable
 PORT=32500
@@ -19,7 +23,7 @@ export HF_HOME="/mnt/afs_01e/mayi-folder/hf-cache"
 if [[ "$HOST" == "$HOSTNAME_STR"* && -z "$LSPROG" ]]; then
   # Port is free, start the test server
   echo "Port $PORT is not in use. Starting test server..."
-  python test_server.py -p $PORT
+  python "$REPO_ROOT/test_server.py" -p "$PORT"
 else
   # Port is in use or -h argument is provided, start test-related tasks on GPUs
   echo "Starting tasks on GPUs..."
@@ -30,7 +34,7 @@ else
   for ((i=0; i<NumGPU; i++)); do
     for ((j=0; j<n; j++)); do
       echo "Launching task $j on GPU $i"
-      CUDA_VISIBLE_DEVICES=$i python test.py -h $HOST -p $PORT &
+      CUDA_VISIBLE_DEVICES=$i python "$REPO_ROOT/test.py" -h "$HOST" -p "$PORT" &
     done
   done
 

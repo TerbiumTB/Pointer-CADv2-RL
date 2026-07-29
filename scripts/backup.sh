@@ -4,8 +4,9 @@
 
 set -euo pipefail
 
-BASE_DIR="$(pwd)"
-LOG_DIR="$BASE_DIR/log"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+LOG_DIR="$REPO_ROOT/log"
 INTERVAL=600   # 10 分钟 = 600 秒
 
 scan_and_backup() {

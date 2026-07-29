@@ -1,0 +1,44 @@
+model:
+  base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+  checkpoint_path: "/path/to/sft/model.pth"
+  max_length: 3072
+
+dataset:
+  episodes_root: "/path/to/pointercad-rl/episodes"
+  rollout_root: "/path/to/pointercad-rl/rollouts/sft-05b-k5"
+  preferences_root: "/path/to/pointercad-rl/preferences/geometry-v1"
+
+# "model" keeps a frozen SFT copy in memory. "cached" reads total_logp from
+# rollouts/scores for checkpoint_hash and avoids loading a reference model.
+reference:
+  mode: "model"
+  checkpoint_path: "/path/to/sft/model.pth"
+  checkpoint_hash: "sft-model-hash"
+
+training:
+  output_dir: "./log/dpo"
+  num_epochs: 10
+  batch_size: 1
+  gradient_accumulation_steps: 16
+  learning_rate: 1.0e-5
+  tau_learning_rate: 1.0e-6
+  weight_decay: 0.01
+  beta: 0.3
+  label_smoothing: 0.0
+  mixed_precision: "bf16"
+  max_grad_norm: 1.0
+  final_lr_factor: 0.0
+  num_workers: 0
+  prefetch_factor: 2
+  pin_memory: false
+  seed: 0
+  log_interval: 10
+  checkpoint_interval: 100
+  validation_interval: 1
+
+# DPO scores the underlying model policy, not rollout sampling distributions.
+scoring_temperatures:
+  plan: 1.0
+  label: 1.0
+  parameter: 1.0
+  pointer: 1.0

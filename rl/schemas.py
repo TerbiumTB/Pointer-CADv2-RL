@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional
@@ -38,8 +36,6 @@ class RecordMixin:
 
 @dataclass(frozen=True)
 class EpisodeRecord(RecordMixin):
-    """One full-model RL task derived from the source step-level dataset."""
-
     task_id: str
     split: str
     source_dataset: str
@@ -70,8 +66,6 @@ class EpisodeRecord(RecordMixin):
 
 @dataclass(frozen=True)
 class TrajectoryRecord(RecordMixin):
-    """Summary of one complete policy attempt for an episode."""
-
     trajectory_id: str
     task_id: str
     rollout_index: int
@@ -103,11 +97,10 @@ class TrajectoryRecord(RecordMixin):
 
 @dataclass(frozen=True)
 class StepRecord(RecordMixin):
-    """One environment transition inside a generated trajectory."""
-
     trajectory_id: str
     step_index: int
     state_before_id: str
+    state_before_graph_path: str
     state_after_id: Optional[str]
     plan_text: str
     plan_token_ids: List[int]
@@ -125,10 +118,26 @@ class StepRecord(RecordMixin):
     def __post_init__(self) -> None:
         _require_identifier(self.trajectory_id, "trajectory_id")
         _require_identifier(self.state_before_id, "state_before_id")
+        _require_relative_path(
+            self.state_before_graph_path, "state_before_graph_path"
+        )
         if self.step_index < 0:
             raise ValueError("step_index must be non-negative.")
         if not (len(self.labels) == len(self.parameters) == len(self.pointers)):
             raise ValueError("labels, parameters and pointers must have equal length.")
+        if not (
+            len(self.labels)
+            == len(self.behavior_label_logps)
+            == len(self.behavior_parameter_logps)
+            == len(self.behavior_pointer_logps)
+        ):
+            raise ValueError(
+                "Structured behavior log-probabilities must align with actions."
+            )
+        if len(self.plan_token_ids) != len(self.behavior_plan_logps):
+            raise ValueError(
+                "Behavior plan log-probabilities must align with LM tokens."
+            )
         parse_json_object(self.parameter_map_json)
 
     @property
@@ -138,8 +147,6 @@ class StepRecord(RecordMixin):
 
 @dataclass(frozen=True)
 class ScoreRecord(RecordMixin):
-    """Cached trajectory log-probability under a particular checkpoint."""
-
     trajectory_id: str
     checkpoint_hash: str
     plan_logp: float
@@ -155,8 +162,6 @@ class ScoreRecord(RecordMixin):
 
 @dataclass(frozen=True)
 class PreferenceRecord(RecordMixin):
-    """A lightweight preferred/rejected view over two stored trajectories."""
-
     pair_id: str
     task_id: str
     preferred_trajectory_id: str

@@ -1,5 +1,3 @@
-"""PointerCAD post-training components."""
-
 from rl.schemas import (
     EpisodeRecord,
     PreferenceRecord,
