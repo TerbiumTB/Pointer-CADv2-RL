@@ -304,12 +304,7 @@ OpenCascade execution выполняются последовательно. Ф�
 - модули не импортировались;
 - unit/smoke tests не запускались.
 
-Пользователь сначала должен настроить среду. Для Parquet persistence нужен
-`pyarrow`. Полный pipeline также требует PyTorch, DGL, Transformers, PEFT,
-pythonocc-core/occwl и Accelerate. Custom DPO baseline не требует TRL.
-
-До настройки среды не запускать RL builders или обучение без нового явного
-запроса пользователя.
+Основная среда для работы с кодом – conda environment под названием pointercad-rl-local, она была создана из файла environment.local.yml.
 
 ## Следующие шаги
 
