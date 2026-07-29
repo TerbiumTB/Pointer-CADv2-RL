@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+set -o pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-CONDA_ROOT="${CONDA_ROOT:-/root/miniconda3}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-pointercad-rl-local}"
 CONFIG_PATH="${CONFIG_PATH:-$REPO_ROOT/config/rl_preferences.yaml}"
 HF_HOME="${HF_HOME:-/mnt/afs_01e/mayi-folder/hf-cache}"
 LOG_DIR="${LOG_DIR:-$REPO_ROOT/log/rl_data}"
 
-source "$CONDA_ROOT/etc/profile.d/conda.sh"
+source /root/miniconda3/etc/profile.d/conda.sh
 conda activate "$CONDA_ENV_NAME"
 export HF_HOME
 
