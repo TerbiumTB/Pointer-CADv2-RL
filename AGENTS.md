@@ -244,8 +244,6 @@ preference view. Rollouts при этом не генерируются зано
 - `scripts/rl_build_episodes.sh`, `scripts/rl_generate_rollouts.sh`,
   `scripts/rl_build_preferences.sh`, `scripts/dpo_train.sh` — launch scripts с
   активацией conda, GPU-настройками и логированием.
-- `scripts/rl_common.sh` — общие функции conda/environment для RL launch
-  scripts.
 - `rl/README.md` — описание формата.
 
 Динамические dictionaries сохраняются как canonical JSON strings; числовые

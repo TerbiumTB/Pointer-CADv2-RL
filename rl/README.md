@@ -95,7 +95,7 @@ CONFIG_PATH=/path/to/dpo_train.yaml GPU_IDS=0,1,2,3 NUM_GPUS=4 \
   ./scripts/dpo_train.sh
 ```
 
-Common overrides are `CONDA_ENV_NAME`, `HF_CACHE_DIR`, `PROXY_SCRIPT`,
+Common overrides are `CONDA_ROOT`, `CONDA_ENV_NAME`, `HF_HOME`,
 `CONFIG_PATH` and `LOG_DIR`. Rollout generation currently uses one GPU;
 multi-GPU configuration applies to DPO training through Accelerate.
 

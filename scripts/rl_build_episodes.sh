@@ -4,23 +4,20 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-source "$SCRIPT_DIR/rl_common.sh"
+cd "$REPO_ROOT"
 
+CONDA_ROOT="${CONDA_ROOT:-/root/miniconda3}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-pointercad-rl-local}"
 CONFIG_PATH="${CONFIG_PATH:-$REPO_ROOT/config/rl_dataset.yaml}"
-HF_CACHE_DIR="${HF_CACHE_DIR:-${HF_HOME:-}}"
-PROXY_SCRIPT="${PROXY_SCRIPT:-}"
+HF_HOME="${HF_HOME:-/mnt/afs_01e/mayi-folder/hf-cache}"
 LOG_DIR="${LOG_DIR:-$REPO_ROOT/log/rl_data}"
 
-rl_prepare_environment \
-    "$REPO_ROOT" \
-    "$CONDA_ENV_NAME" \
-    "$HF_CACHE_DIR" \
-    "$PROXY_SCRIPT"
-rl_require_file "$CONFIG_PATH" "Episode builder config"
-mkdir -p "$LOG_DIR"
+source "$CONDA_ROOT/etc/profile.d/conda.sh"
+conda activate "$CONDA_ENV_NAME"
+export HF_HOME
 
-LOG_PATH="$LOG_DIR/build_episodes_$(rl_timestamp).log"
+mkdir -p "$LOG_DIR"
+LOG_PATH="$LOG_DIR/build_episodes_$(date +"%Y%m%d_%H%M%S").log"
 
 echo "[INFO] Conda environment: $CONDA_ENV_NAME"
 echo "[INFO] Config: $CONFIG_PATH"
