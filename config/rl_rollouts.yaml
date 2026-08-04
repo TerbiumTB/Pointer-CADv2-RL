@@ -1,8 +1,15 @@
-run_id: "sft-05b-k5-20260804"
+run_id: "sft-05b-k2-20260804"
 generator_version: "rollout-generator-v1"
-episodes_root: "/home/terbium/datasets/paramcad-addon/format/pointercad-rl/episodes"
-source_dataset_root: "/mnt/afs_01e/mayi-folder/ParamCAD/dataset/paramcad-addon/dataset-addon"
-output_root: "/home/terbium/datasets/paramcad-addon/format/pointercad-rl/rollouts"
+
+# episodes_root: "/home/terbium/datasets/paramcad-addon/format/pointercad-rl/episodes"
+# source_dataset_root: "/mnt/afs_01e/mayi-folder/ParamCAD/dataset/paramcad-addon/dataset-addon"
+# output_root: "/home/terbium/datasets/paramcad-addon/format/pointercad-rl/rollouts"
+
+# smoke
+episodes_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/episodes"
+source_dataset_root: "/home/terbium/datasets/paramcad-addon/smoke/dataset"
+output_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/rollouts"
+
 splits:
   - train
   - validation
@@ -14,7 +21,7 @@ model:
   dtype: "bfloat16"
 
 generation:
-  trajectories_per_episode: 5
+  trajectories_per_episode: 2
   base_seed: 0
   max_episode_steps: 64
   max_generation_steps: 1024
@@ -22,6 +29,7 @@ generation:
   write_shard_size: 64
   max_episodes_per_split: null
   task_ids: null
+  resume: false
   temperatures:
     plan: 1.0
     label: 1.0
