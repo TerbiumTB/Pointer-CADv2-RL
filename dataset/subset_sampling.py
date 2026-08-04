@@ -8,19 +8,23 @@ installed.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import random
 import shutil
 import tempfile
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, MutableMapping, Sequence, Set, Tuple
+
+from tqdm.auto import tqdm
 
 
 SPLITS = ("train", "validation", "test")
 SPECIAL_OPERATIONS = ("fillet", "chamfer")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -74,6 +78,7 @@ def part_sort_key(part_id: str) -> Tuple[int, object]:
 
 
 def read_split_file(split_path: Path) -> Dict[str, List[str]]:
+    logger.info("Reading source split: %s", split_path)
     with Path(split_path).open("r", encoding="utf-8") as file:
         raw = json.load(file)
     if not isinstance(raw, dict):
@@ -92,7 +97,11 @@ def read_split_file(split_path: Path) -> Dict[str, List[str]]:
         if not isinstance(values, list):
             raise ValueError(f"Split {split!r} must be a list.")
         result[split] = []
-        for raw_step_id in values:
+        for raw_step_id in tqdm(
+            values,
+            desc=f"Read {split} split",
+            unit="step",
+        ):
             step_id = str(raw_step_id)
             chunk, model_id, _ = parse_step_id(step_id)
             if step_id in seen:
@@ -106,6 +115,13 @@ def read_split_file(split_path: Path) -> Dict[str, List[str]]:
                     f"{previous!r} and {split!r}."
                 )
             result[split].append(step_id)
+    logger.info(
+        "Loaded %d step records: train=%d, validation=%d, test=%d",
+        sum(len(result[split]) for split in SPLITS),
+        len(result["train"]),
+        len(result["validation"]),
+        len(result["test"]),
+    )
     return result
 
 
@@ -174,16 +190,34 @@ def build_model_index(
     split_data: Mapping[str, Sequence[str]],
     inspect_operations: bool = True,
 ) -> List[ModelInfo]:
+    logger.info(
+        "Building model index%s",
+        " and inspecting operation types" if inspect_operations else "",
+    )
     grouped: MutableMapping[
         Tuple[str, str, str], List[Tuple[str, str]]
     ] = defaultdict(list)
     for split in SPLITS:
-        for step_id in split_data.get(split, []):
+        step_ids = split_data.get(split, [])
+        for step_id in tqdm(
+            step_ids,
+            desc=f"Group {split} steps",
+            unit="step",
+        ):
             chunk, model_id, part_id = parse_step_id(step_id)
             grouped[(split, chunk, model_id)].append((part_id, step_id))
 
     result = []
-    for (split, chunk, model_id), parts_and_ids in sorted(grouped.items()):
+    grouped_items = sorted(grouped.items())
+    for (split, chunk, model_id), parts_and_ids in tqdm(
+        grouped_items,
+        desc=(
+            "Inspect CAD models"
+            if inspect_operations
+            else "Build CAD model index"
+        ),
+        unit="model",
+    ):
         ordered = sorted(parts_and_ids, key=lambda value: part_sort_key(value[0]))
         part_ids = tuple(value[0] for value in ordered)
         step_ids = tuple(value[1] for value in ordered)
@@ -202,6 +236,12 @@ def build_model_index(
                 operation_types=operation_types,
             )
         )
+    counts = model_counts(result)
+    logger.info(
+        "Indexed %(models)d models, %(step_records)d step records, "
+        "%(chunks)d chunks",
+        counts,
+    )
     return result
 
 
@@ -244,6 +284,7 @@ def sample_smoke_models(
     models: Sequence[ModelInfo],
     config: Mapping[str, object],
     rng: random.Random,
+    dataset_dir: Path,
 ) -> List[ModelInfo]:
     num_chunks = int(config["num_chunks"])
     models_per_chunk = int(config["models_per_chunk"])
@@ -272,92 +313,99 @@ def sample_smoke_models(
         )
 
     attempts = int(config.get("max_sampling_attempts", 2000))
-    property_names = (
-        "multistep_models",
-        "fillet_models",
-        "chamfer_models",
-        "plain_models",
+    logger.info(
+        "Sampling smoke subset: split=%s, chunks=%d, models_per_chunk=%d, "
+        "eligible_chunks=%d",
+        split,
+        num_chunks,
+        models_per_chunk,
+        len(eligible_chunks),
     )
-    property_getters = {
-        "multistep_models": lambda item: item.is_multistep,
-        "fillet_models": lambda item: item.has_fillet,
-        "chamfer_models": lambda item: item.has_chamfer,
-        "plain_models": lambda item: item.is_plain,
-    }
-
-    for _ in range(attempts):
+    operation_cache: Dict[Tuple[str, str], Tuple[str, ...]] = {}
+    best_counts: Dict[str, int] = {}
+    best_score = -1
+    attempt_progress = tqdm(
+        range(1, attempts + 1),
+        desc="Sample smoke candidates",
+        unit="attempt",
+    )
+    for attempt in attempt_progress:
         chosen_chunks = rng.sample(eligible_chunks, num_chunks)
-        selected: List[ModelInfo] = []
-        selected_keys: Set[Tuple[str, str]] = set()
-        chunk_counts: Counter[str] = Counter()
+        selected = [
+            model
+            for chunk in chosen_chunks
+            for model in rng.sample(by_chunk[chunk], models_per_chunk)
+        ]
 
-        while True:
-            counts = model_counts(selected)
-            deficits = {
-                name: max(
-                    0,
-                    _requirement_value(requirements, f"min_{name}")
-                    - counts[name],
-                )
-                for name in property_names
-            }
-            if not any(deficits.values()):
-                break
-            candidates = [
-                model
-                for chunk in chosen_chunks
-                for model in by_chunk[chunk]
-                if (model.chunk, model.model_id) not in selected_keys
-                and chunk_counts[model.chunk] < models_per_chunk
-            ]
-            rng.shuffle(candidates)
-            candidates.sort(
-                key=lambda model: sum(
-                    deficits[name] > 0 and property_getters[name](model)
-                    for name in property_names
-                ),
-                reverse=True,
-            )
-            if not candidates:
-                break
-            best = candidates[0]
-            contribution = sum(
-                deficits[name] > 0 and property_getters[name](best)
-                for name in property_names
-            )
-            if contribution == 0:
-                break
-            selected.append(best)
-            selected_keys.add((best.chunk, best.model_id))
-            chunk_counts[best.chunk] += 1
-
-        for chunk in chosen_chunks:
-            remaining = [
-                model
-                for model in by_chunk[chunk]
-                if (model.chunk, model.model_id) not in selected_keys
-            ]
-            rng.shuffle(remaining)
-            need = models_per_chunk - chunk_counts[chunk]
-            for model in remaining[:need]:
-                selected.append(model)
-                selected_keys.add((model.chunk, model.model_id))
-                chunk_counts[chunk] += 1
-
-        if (
-            all(chunk_counts[chunk] == models_per_chunk for chunk in chosen_chunks)
-            and _requirements_met(selected, requirements)
+        # Multi-step status is already known from the split and costs no file
+        # reads. Reject unsuitable candidates before opening their CAD JSONs.
+        if sum(model.is_multistep for model in selected) < _requirement_value(
+            requirements, "min_multistep_models"
         ):
-            return sorted(
-                selected, key=lambda item: (item.chunk, item.model_id, item.split)
-            )
+            continue
 
-    available = model_counts(
-        [model for chunk in eligible_chunks for model in by_chunk[chunk]]
-    )
+        inspected = []
+        for model in selected:
+            model_key = (model.chunk, model.model_id)
+            operation_types = operation_cache.get(model_key)
+            if operation_types is None:
+                operation_types = inspect_operation_types(
+                    dataset_dir,
+                    model.chunk,
+                    model.model_id,
+                    model.part_ids,
+                )
+                operation_cache[model_key] = operation_types
+            inspected.append(replace(model, operation_types=operation_types))
+
+        counts = model_counts(inspected)
+        score = sum(
+            min(
+                counts[name],
+                _requirement_value(requirements, f"min_{name}"),
+            )
+            for name in (
+                "multistep_models",
+                "fillet_models",
+                "chamfer_models",
+                "plain_models",
+            )
+        )
+        if score > best_score:
+            best_score = score
+            best_counts = counts
+        attempt_progress.set_postfix(
+            fillet=counts["fillet_models"],
+            chamfer=counts["chamfer_models"],
+            multistep=counts["multistep_models"],
+            plain=counts["plain_models"],
+            cached=len(operation_cache),
+            refresh=False,
+        )
+
+        if _requirements_met(inspected, requirements):
+            result = sorted(
+                inspected,
+                key=lambda item: (item.chunk, item.model_id, item.split),
+            )
+            # The iterator increments after the loop body. Account for the
+            # successful final attempt before returning early.
+            attempt_progress.update(1)
+            attempt_progress.close()
+            logger.info(
+                "Smoke subset selected on attempt %d after inspecting %d unique "
+                "models: %s",
+                attempt,
+                len(operation_cache),
+                model_counts(result),
+            )
+            return result
+
+    attempt_progress.close()
     raise ValueError(
         "Could not satisfy smoke sampling constraints after "
-        f"{attempts} attempts. Available candidate counts: {available}"
+        f"{attempts} attempts and {len(operation_cache)} inspected models. "
+        f"Best sampled candidate counts: {best_counts}"
     )
 
 
@@ -431,6 +479,7 @@ def sample_target_models(
         targets = _largest_remainder_targets(total, fractions)
 
     selected: List[ModelInfo] = []
+    logger.info("Sampling target step counts by split: %s", targets)
     for split in SPLITS:
         split_models = [model for model in models if model.split == split]
         available = sum(model.num_steps for model in split_models)
@@ -442,6 +491,7 @@ def sample_target_models(
         selected.extend(
             _sample_models_to_step_target(split_models, targets[split], rng)
         )
+    logger.info("Target-record subset selected: %s", model_counts(selected))
     return selected, targets
 
 
@@ -503,15 +553,30 @@ def materialize_subset(
     try:
         dataset_output = staging / "dataset"
         if strategy != "none":
+            logger.info(
+                "Materializing %d models with strategy=%s into %s",
+                len(models),
+                strategy,
+                output_root,
+            )
             dataset_output.mkdir()
-            for model in sorted(
+            ordered_models = sorted(
                 models, key=lambda item: (item.chunk, item.model_id)
+            )
+            for model in tqdm(
+                ordered_models,
+                desc=f"Materialize ({strategy})",
+                unit="model",
             ):
                 source = source_dataset_dir / model.chunk / model.model_id
                 if not source.is_dir():
                     raise FileNotFoundError(f"Missing model directory: {source}")
                 destination = dataset_output / model.chunk / model.model_id
                 _copy_model(source, destination, strategy)
+        else:
+            logger.info(
+                "Materialization disabled; writing split and manifest only"
+            )
 
         with (staging / "train_val_test.json").open("w", encoding="utf-8") as file:
             json.dump(split_data, file, indent=2, ensure_ascii=False)
@@ -523,6 +588,7 @@ def materialize_subset(
         if output_root.exists():
             shutil.rmtree(output_root)
         os.replace(staging, output_root)
+        logger.info("Subset written successfully: %s", output_root)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -558,6 +624,7 @@ def validate_subset(
     prompt_variants: Sequence[str],
     check_files: bool = True,
 ) -> Dict[str, object]:
+    logger.info("Validating subset dataset=%s split=%s", dataset_dir, split_path)
     split_data = read_split_file(split_path)
     models = build_model_index(dataset_dir, split_data, inspect_operations=True)
     counts = model_counts(models)
@@ -594,7 +661,12 @@ def validate_subset(
 
     missing_files: List[str] = []
     if check_files:
-        for model in models:
+        logger.info("Checking required files for %d models", len(models))
+        for model in tqdm(
+            models,
+            desc="Validate model files",
+            unit="model",
+        ):
             model_dir = Path(dataset_dir) / model.chunk / model.model_id
             for part_id in model.part_ids:
                 for path in expected_step_paths(
@@ -613,6 +685,11 @@ def validate_subset(
         operation_type
         for model in models
         for operation_type in model.operation_types
+    )
+    logger.info(
+        "Validation %s: %s",
+        "passed" if not errors else "failed",
+        counts,
     )
     return {
         "ok": not errors,

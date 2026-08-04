@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Mapping
@@ -33,6 +34,12 @@ def parse_args() -> argparse.Namespace:
         "--skip-file-check",
         action="store_true",
         help="Check split/statistical constraints without checking every file.",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        help="Logging verbosity. Default: INFO.",
     )
     return parser.parse_args()
 
@@ -66,6 +73,10 @@ def _requirements(manifest: Mapping[str, object]) -> Mapping[str, object]:
 
 def main() -> None:
     args = parse_args()
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s | %(levelname)s | %(message)s",
+    )
     subset_root = Path(args.subset_root).absolute()
     manifest_path = subset_root / "subset_manifest.json"
     with manifest_path.open("r", encoding="utf-8") as file:

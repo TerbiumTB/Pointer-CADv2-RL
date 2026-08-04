@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Sample reproducible, model-complete PointerCAD dataset subsets."""
-
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import random
 import sys
 from pathlib import Path
@@ -50,6 +49,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Select and report models without writing or copying anything.",
     )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        help="Logging verbosity. Default: INFO.",
+    )
     return parser.parse_args()
 
 
@@ -63,6 +68,10 @@ def _load_config(path: Path) -> Mapping[str, object]:
 
 def main() -> None:
     args = parse_args()
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s | %(levelname)s | %(message)s",
+    )
     config = _load_config(Path(args.config))
     source = config["source"]
     profiles = config["profiles"]
@@ -78,14 +87,10 @@ def main() -> None:
     split_path = Path(str(source["split_filepath"])).absolute()
     split_data = read_split_file(split_path)
 
-    # Operation inspection is needed for constrained smoke selection. Reuse the
-    # resulting index for every requested profile.
-    inspect_operations = any(
-        str(profiles[name].get("mode")) == "smoke"
-        for name in requested_profiles
-    )
+    # Building the global index only groups cheap step IDs. Smoke operation
+    # constraints are checked lazily on each randomly sampled candidate.
     models = build_model_index(
-        dataset_dir, split_data, inspect_operations=inspect_operations
+        dataset_dir, split_data, inspect_operations=False
     )
 
     for profile_name in requested_profiles:
@@ -97,9 +102,12 @@ def main() -> None:
         mode = str(profile["mode"])
         targets: Dict[str, int] = {}
         if mode == "smoke":
-            if not inspect_operations:
-                raise AssertionError("Smoke sampling requires operation inspection.")
-            selected = sample_smoke_models(models, profile, rng)
+            selected = sample_smoke_models(
+                models,
+                profile,
+                rng,
+                dataset_dir=dataset_dir,
+            )
         elif mode == "target_records":
             selected, targets = sample_target_models(models, profile, rng)
         else:
@@ -122,7 +130,7 @@ def main() -> None:
             "source_dataset_dir": str(dataset_dir),
             "source_split_filepath": str(split_path),
             "materialization": str(profile.get("materialization", "copy")),
-            "operations_inspected_during_sampling": inspect_operations,
+            "operations_inspected_during_sampling": mode == "smoke",
             "prompt_variants": list(
                 source.get("prompt_variants", ["abs", "exp"])
             ),

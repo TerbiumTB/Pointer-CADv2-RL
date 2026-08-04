@@ -25,12 +25,6 @@ from models.processor import Text2CADProcessor
 
 
 
-# ---------------------------------------------------------------------------- #
-#                            Text2CAD Training Code                            #
-# ---------------------------------------------------------------------------- #
-
-
-
 def setup(local_rank, global_rank, world_size, master_addr, master_port):
     # Initialize the distributed process group
     dist.init_process_group(

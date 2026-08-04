@@ -40,6 +40,13 @@ python preprocessing/validate_pointercad_subset.py \
 Omit `--profile` to build all profiles. Existing output is protected by
 default; pass `--overwrite` explicitly to replace it.
 
+Both commands show `tqdm` progress bars while reading/grouping split records,
+sampling smoke candidates, materializing files, and validating the result.
+Smoke sampling opens CAD JSON only for the current candidate subset and caches
+those results; it resamples when the requested operation mix is not satisfied.
+Major phase boundaries and final counts are logged at `INFO`; use
+`--log-level WARNING` for quieter output.
+
 ## Materialization modes
 
 - `copy`: independent and portable, but duplicates every selected model.

@@ -178,6 +178,20 @@ def main() -> None:
         ),
         mixed_precision=training.get("mixed_precision", "bf16"),
     )
+    cuda_device_count = torch.cuda.device_count()
+    if cuda_device_count == 0:
+        raise RuntimeError(
+            "DPO training requires CUDA, but torch.cuda.device_count() returned 0."
+        )
+    local_rank = accelerator.local_process_index % cuda_device_count
+    torch.cuda.set_device(local_rank)
+    logger.info(
+        "Process {} uses CUDA device {} of {}: {}",
+        accelerator.process_index,
+        local_rank,
+        cuda_device_count,
+        torch.cuda.get_device_properties(local_rank),
+    )
     set_seed(int(training.get("seed", 0)), device_specific=True)
 
     reference_config = config["reference"]

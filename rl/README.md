@@ -88,15 +88,17 @@ resolve paths relative to the repository and save console logs:
 Settings can be overridden without editing a script:
 
 ```bash
-CONFIG_PATH=/path/to/rl_rollouts.yaml GPU_ID=2 \
-  ./scripts/rl_generate_rollouts.sh
+CONFIG_PATH=/path/to/rl_rollouts.yaml \
+  ./scripts/rl_generate_rollouts.sh --test
 
-CONFIG_PATH=/path/to/dpo_train.yaml GPU_IDS=0,1,2,3 NUM_GPUS=4 \
-  ./scripts/dpo_train.sh
+CONFIG_PATH=/path/to/dpo_train.yaml NUM_GPUS=4 \
+  ./scripts/dpo_train.sh --test
 ```
 
-Common overrides are `CONDA_ROOT`, `CONDA_ENV_NAME`, `HF_HOME`,
-`CONFIG_PATH` and `LOG_DIR`. Rollout generation currently uses one GPU;
+Common overrides are `CONDA_ENV_NAME`, `HF_HOME`, `CONFIG_PATH` and `LOG_DIR`.
+The scripts preserve scheduler-provided `CUDA_VISIBLE_DEVICES` instead of
+overwriting it. Without `--test` they load `~/dist_env.sh` or fall back to
+SenseCore variables. Rollout generation currently uses one visible GPU;
 multi-GPU configuration applies to DPO training through Accelerate.
 
 ## Full-episode DPO

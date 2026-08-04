@@ -1,6 +1,7 @@
 import copy
 import gc
 import hashlib
+import os
 import random
 import time
 from pathlib import Path
@@ -610,9 +611,24 @@ def generate_rollouts(config: Dict[str, Any]) -> Path:
         for trajectory in load_trajectories(str(rollout_root))
     }
 
-    device = torch.device(model_config.get("device", "cuda"))
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but is not available.")
+    requested_device = torch.device(model_config.get("device", "cuda"))
+    if requested_device.type == "cuda":
+        cuda_device_count = torch.cuda.device_count()
+        if cuda_device_count == 0:
+            raise RuntimeError(
+                "CUDA was requested, but torch.cuda.device_count() returned 0."
+            )
+        local_rank = int(os.getenv("LOCAL_RANK", 0)) % cuda_device_count
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        logger.info(
+            "Using CUDA device {} of {}: {}",
+            local_rank,
+            cuda_device_count,
+            torch.cuda.get_device_properties(device),
+        )
+    else:
+        device = requested_device
     dtype = torch_dtype(model_config.get("dtype", "bfloat16"))
     model = PointerCAD(
         qwen_model=model_config["base_model"],

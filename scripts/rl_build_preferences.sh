@@ -1,24 +1,38 @@
 #!/usr/bin/env bash
 
-set -o pipefail
+set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-CONDA_ENV_NAME="${CONDA_ENV_NAME:-pointercad-rl-local}"
-CONFIG_PATH="${CONFIG_PATH:-$REPO_ROOT/config/rl_preferences.yaml}"
-HF_HOME="${HF_HOME:-/mnt/afs_01e/mayi-folder/hf-cache}"
-LOG_DIR="${LOG_DIR:-$REPO_ROOT/log/rl_data}"
+POINTERCAD_ENV_FILE="${POINTERCAD_ENV_FILE:-$REPO_ROOT/.env}"
+if [[ -f "$POINTERCAD_ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$POINTERCAD_ENV_FILE"
+    set +a
+fi
 
-source /root/miniconda3/etc/profile.d/conda.sh
-conda activate "$CONDA_ENV_NAME"
-export HF_HOME
+POINTERCAD_CONDA_ENV="${POINTERCAD_CONDA_ENV:-pointercad}"
+POINTERCAD_CONDA_EXE="${POINTERCAD_CONDA_EXE:-conda}"
+if ! CONDA_HOOK="$("$POINTERCAD_CONDA_EXE" shell.bash hook)"; then
+    echo "[ERROR] Cannot initialize conda. Check POINTERCAD_CONDA_EXE in .env." >&2
+    exit 1
+fi
+
+eval "$CONDA_HOOK"
+conda activate "$POINTERCAD_CONDA_ENV"
+
+POINTERCAD_LOG_ROOT="${POINTERCAD_LOG_ROOT:-$REPO_ROOT/log}"
+CONFIG_PATH="${CONFIG_PATH:-$REPO_ROOT/config/rl_preferences.yaml}"
+LOG_DIR="${LOG_DIR:-$POINTERCAD_LOG_ROOT/rl_data}"
 
 mkdir -p "$LOG_DIR"
 LOG_PATH="$LOG_DIR/build_preferences_$(date +"%Y%m%d_%H%M%S").log"
 
-echo "[INFO] Conda environment: $CONDA_ENV_NAME"
+echo "[INFO] Conda environment: $POINTERCAD_CONDA_ENV"
+echo "[INFO] Python executable: $(python -c 'import sys; print(sys.executable)')"
 echo "[INFO] Config: $CONFIG_PATH"
 echo "[INFO] Log: $LOG_PATH"
 

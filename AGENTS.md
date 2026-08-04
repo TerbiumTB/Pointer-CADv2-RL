@@ -1,7 +1,22 @@
 # PointerCADv2-RL: контекст проекта
 
-Актуально на 2026-07-28. Этот файл фиксирует текущее состояние проекта,
+Актуально на 2026-08-04. Этот файл фиксирует текущее состояние проекта,
 архитектурные решения и ограничения для последующей работы.
+
+## Границы изменений
+
+Основная область работы — новый RL pipeline. В первую очередь менять:
+
+- `rl/`, кроме legacy-файла `rl_train.py` в корне репозитория;
+- RL-related builders в `preprocessing/`;
+- RL-related configs в `config/` и launch scripts в `scripts/`;
+- целевые entry points вроде `dpo_train.py`.
+
+Остальной SFT/CAD/evaluation-код по возможности оставлять без изменений. Если
+для RL нужна интеграция с общим кодом, делать минимальное и обратно
+совместимое изменение, не переписывая без необходимости рабочий SFT
+pipeline. `rl_train.py` считать замороженным legacy reference: не
+исправлять и не строить на нём новую RL-реализацию.
 
 ## Текущая задача
 
@@ -127,13 +142,13 @@ Step-level представление остаётся доступным как
 Все производные данные располагаются под:
 
 ```text
-<source_dataset>/format/pointercad_rl/
+<source_dataset>/format/pointercad-rl/
 ```
 
 Структура:
 
 ```text
-format/pointercad_rl/
+format/pointercad-rl/
 ├── episodes/
 │   ├── config.yaml
 │   ├── train.parquet
@@ -298,13 +313,54 @@ OpenCascade execution выполняются последовательно. Ф�
 
 ## Среда и проверки
 
-По явной просьбе пользователя новый RL data code пока не запускался:
+Есть две разные conda-среды:
 
-- builders не выполнялись;
-- модули не импортировались;
-- unit/smoke tests не запускались.
+- `pointercad-rl-local` — локальная CPU-среда для совместной работы; она создана из
+  `environment.local.yml`;
+- `pointercad` — серверная среда пользователя. Её имя может и должно встречаться
+  в серверных config/launch scripts; не заменять её автоматически на локальную.
 
-Основная среда для работы с кодом – conda environment под названием pointercad-rl-local, она была создана из файла environment.local.yml.
+Новые RL launch scripts используют общий набор runtime-переменных прямо в
+прологе каждого script и при наличии загружают корневой `.env`. Шаблон без
+секретов находится в `.env.example`. Основные переменные:
+`POINTERCAD_CONDA_ENV`, `POINTERCAD_CONDA_EXE`, `POINTERCAD_LOG_ROOT`,
+`POINTERCAD_DIST_ENV_SCRIPT`, `POINTERCAD_PROXY_ENV_SCRIPT`, `HF_HOME` и
+`PYTORCH_CUDA_ALLOC_CONF`. Машинозависимые значения хранятся в игнорируемом
+`.env`; dataset paths, checkpoints и параметры эксперимента остаются в YAML.
+Значение conda environment по умолчанию для серверных scripts — `pointercad`,
+локальный `.env` должен переопределять его на `pointercad-rl-local`.
+
+Локального GPU нет. В `pointercad-rl-local` можно запускать unit tests, imports,
+schema/data builders на маленьких subsets и другие процессы, которые разумно
+работают на CPU. Не запускать локально GPU-dependent training, model rollout
+generation или другие тяжёлые GPU jobs. Такие запуски выполняет пользователь на
+сервере. До серверного запуска локально проверять синтаксис, config parsing и
+другие CPU-safe части, если это возможно.
+
+На сервере репозиторий доступен по symbolic link
+`/home/terbium/PointerCADv2-RL`. Серверные scripts/configs могут использовать этот путь,
+но в общем случае лучше вычислять корень репозитория от положения script, как это
+сделано в `scripts/train.sh`.
+
+Если один и тот же config неудобно использовать локально и на сервере,
+разрешается создать его локальную копию в `config/local/`. Серверные configs
+остаются основными; локальные копии должны отличаться только настройками,
+нужными для CPU/local paths, и не должны случайно менять семантику эксперимента.
+
+### Эталон для training scripts
+
+`scripts/train.sh` и `train.py` — рабочий серверный reference для организации training. При
+создании или изменении RL training scripts и entry points ориентироваться на их
+паттерны:
+
+- активацию серверной conda-среды `pointercad`;
+- определение корня репозитория и работу из него;
+- поддержку одной и нескольких нод через те же distributed environment variables;
+- rank-aware logging, checkpointing и experiment tracking;
+- конфигурируемые dataset, model, optimizer и training parameters.
+
+Не рефакторить `scripts/train.sh` и `train.py` только ради единообразия с RL-кодом: это
+стабильный reference, а не область текущей переработки.
 
 ## Следующие шаги
 
@@ -325,8 +381,12 @@ OpenCascade execution выполняются последовательно. Ф�
 
 - Worktree содержит многочисленные изменения пользователя, включая untracked
   RL-файлы. Не удалять и не откатывать несвязанные изменения.
+- Не обновлять `README.md` и другие README после каждого изменения. Обновлять их только
+  по явной просьбе или когда без этого документация станет существенно неверной.
+  `AGENTS.md` — основной живой документ проекта; его нужно держать актуальным при изменении
+  архитектуры, workflow, среды или ограничений.
 - Не изменять исходный CAD-датасет; создавать только производные файлы под
-  `format/pointercad_rl`.
+  `format/pointercad-rl`.
 - Сохранять dataset-facing имена `preferred/rejected` и каталог `data`.
 - Версионировать preprocessing, metrics, reward, checkpoints и sampling config,
   чтобы derived data можно было воспроизвести.
