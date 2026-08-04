@@ -274,6 +274,19 @@ OpenCascade execution выполняются последовательно. Ф�
 этого решения, поэтому worker isolation можно добавить после smoke-test
 реального окружения.
 
+Progress rollout generator считается по отдельным trajectories, а не по
+episode-задачам. Для каждой задачи логи отдельно показывают число trajectories,
+завершившихся через `model_end`, число сохранённых STEP/mesh и распределение
+termination reasons; это разные критерии успешности. Служебный OpenCascade STEP
+transfer banner по умолчанию подавляется через
+`outputs.suppress_step_export_output`, при этом export errors остаются в логах.
+Pending records записываются в Parquet перед итоговой строкой каждого split.
+Повторный запуск rollout generator по умолчанию продолжает существующий run:
+зафиксированные deterministic trajectory IDs пропускаются, а отсутствующие
+генерируются. CLI-флаг `--force`/`-f` удаляет только целевой каталог
+`<output_root>/<run_id>` целиком и создаёт run заново; несовпадающий runtime
+config без `--force` считается ошибкой.
+
 ## Что пока не реализовано
 
 - Изолированный CAD executor для rollout workers.
@@ -361,6 +374,20 @@ generation или другие тяжёлые GPU jobs. Такие запуск�
 
 Не рефакторить `scripts/train.sh` и `train.py` только ради единообразия с RL-кодом: это
 стабильный reference, а не область текущей переработки.
+
+### SFT evaluation
+
+Legacy evaluation остаётся доступным для SFT checkpoints. `scripts/test.sh`
+теперь является single-node launcher: он загружает корневой `.env`, запускает
+локальный `test_server.py`, создаёт по умолчанию один worker на каждую видимую
+GPU, вызывает `test.py` с общим output directory и затем строит `report.json`
+через `eval.py`. Config передаётся через `-c/--config`; число workers на GPU —
+через `-w/--workers-per-gpu` и по умолчанию равно одному.
+
+Исходный split остаётся step-level, но progressive evaluation выполняется на
+уровне полной модели: `test.py` выбирает последний `part_id` для каждого
+`(chunk, model_id)` перед генерацией. Один evaluation run использует один prompt
+variant, заданный как `dataset.prompt_variant` в `config/test.yaml`.
 
 ## Следующие шаги
 

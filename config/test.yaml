@@ -15,6 +15,8 @@ dataset:
   dataset_dir: "/home/terbium/datasets/paramcad-addon/smoke"
   # JSON file containing information about train, test, and validation splits
   split_filepath: "/home/terbium/datasets/paramcad-addon/smoke/train_val_test.json"
+  # Progressive evaluation currently evaluates one prompt variant per CAD model.
+  prompt_variant: "exp"
   # Maximum sequence length for input data
   max_seq_len: 512
 

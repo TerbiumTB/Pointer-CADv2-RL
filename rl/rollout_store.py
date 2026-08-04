@@ -18,6 +18,27 @@ class RolloutStore:
         self.state_data_dir = self.data_dir / "states"
 
     @classmethod
+    def remove_existing(cls, root: Path, expected_parent: Path) -> None:
+        """Remove one explicitly named rollout run without following symlinks."""
+        root = Path(root)
+        expected_parent = Path(expected_parent)
+        root_absolute = root.absolute()
+        parent_absolute = expected_parent.absolute()
+        if root_absolute.parent != parent_absolute:
+            raise ValueError(
+                f"Refusing to remove rollout store outside {expected_parent}: {root}"
+            )
+        if not root_absolute.name or root_absolute.name in {".", ".."}:
+            raise ValueError(f"Unsafe rollout store path: {root}")
+        if root.is_symlink():
+            raise ValueError(f"Refusing to remove symlinked rollout store: {root}")
+        if not root.exists():
+            return
+        if not root.is_dir():
+            raise NotADirectoryError(root)
+        shutil.rmtree(root)
+
+    @classmethod
     def create(
         cls, root: Path, config: Dict[str, Any], exist_ok: bool = False
     ) -> "RolloutStore":
@@ -38,7 +59,9 @@ class RolloutStore:
             existing_config = read_yaml(config_path)
             if existing_config != config:
                 raise ValueError(
-                    f"Cannot resume rollout store with a different config: {store.root}"
+                    "Cannot continue a rollout store with a different runtime "
+                    f"config: {store.root}. Use a new run_id or recreate the "
+                    "run explicitly with --force."
                 )
         else:
             write_yaml(config_path, config)

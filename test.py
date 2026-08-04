@@ -7,6 +7,8 @@ import requests
 import argparse
 import datetime
 import numpy as np
+from collections import OrderedDict
+from typing import Optional
 from tqdm import tqdm
 from loguru import logger
 
@@ -32,6 +34,34 @@ def parse_config_file(config_file):
     with open(config_file, "r") as file:
         yaml_data = yaml.safe_load(file)
     return yaml_data
+
+
+def select_final_step_ids(step_ids):
+    """Keep the last source step for every CAD model.
+
+    PointerCAD split files are step-level, while progressive evaluation is
+    model-level.  Keeping one final step prevents the coordinator from
+    evaluating a randomly encountered intermediate target for a model.
+    """
+    final_steps = OrderedDict()
+    for step_id in step_ids:
+        parts = str(step_id).split("_")
+        if len(parts) != 3 or not all(parts):
+            raise ValueError(
+                f"Expected '<chunk>_<model_id>_<part_id>', got {step_id!r}."
+            )
+        chunk, model_id, part_id = parts
+        key = (chunk, model_id)
+        try:
+            sort_key = (0, int(part_id))
+        except ValueError:
+            sort_key = (1, part_id)
+
+        previous = final_steps.get(key)
+        if previous is None or sort_key > previous[0]:
+            final_steps[key] = (sort_key, str(step_id))
+
+    return [value[1] for value in final_steps.values()]
 
 
 def get_brep(model: CADModel, surf_u_samples=32, surf_v_samples=32, curv_u_samples=32):
@@ -148,6 +178,8 @@ def main():
                         help="Server host name or IP (default: localhost)")
     parser.add_argument("-p", "--port", type=int, default=32500,
                         help="Server port number (default: 32500)")
+    parser.add_argument("-o", "--output_dir", type=str, default=None,
+                        help="Exact output directory shared by all evaluation workers")
     parser.add_argument("--help", action="help", help="Show this help message and exit.")
     args = parser.parse_args()
 
@@ -179,7 +211,8 @@ def main():
         device=device,
         config=config,
         host=args.host,
-        port=args.port
+        port=args.port,
+        output_dir=args.output_dir,
     )
 
 
@@ -189,7 +222,8 @@ def test_model(
     device,
     config,
     host: str = "localhost",
-    port: int = 32500
+    port: int = 32500,
+    output_dir: Optional[str] = None,
 ):
     """
     Trains a deep learning model.
@@ -208,10 +242,18 @@ def test_model(
         batch_sizes=1,
         num_workers=config["test"]["num_workers"],
         pin_memory=False,
-        shuffle=True,
+        shuffle=False,
         prefetch_factor=config["test"]["prefetch_factor"],
-        prompt_choices=["exp"],
+        prompt_choices=[config["dataset"].get("prompt_variant", "exp")],
     )[0]
+
+    source_step_count = len(test_loader.dataset.data_id)
+    test_loader.dataset.data_id = select_final_step_ids(test_loader.dataset.data_id)
+    logger.info(
+        "Selected {} final CAD models from {} step-level test records.",
+        len(test_loader.dataset.data_id),
+        source_step_count,
+    )
 
     checkpoint_file = config["test"]["checkpoint_path"]
     if checkpoint_file is not None and os.path.exists(checkpoint_file):
@@ -228,10 +270,14 @@ def test_model(
         logger.error("No checkpoint specified or checkpoint file does not exist. Unable to load pretrained model.")
         raise RuntimeError("Checkpoint not specified or not found. Cannot load pretrained model.")
 
+    requested_log_dir = output_dir or os.path.join(
+        config["test"]["log_dir"],
+        f"{datetime.date.today()}/{datetime.datetime.now().strftime('%H:%M')}",
+    )
     log_dir = job_online(
         device_name=torch.cuda.get_device_properties(device).name,
         dataset_size=len(test_loader),
-        log_dir=os.path.join(config["test"]["log_dir"], f"{datetime.date.today()}/{datetime.datetime.now().strftime('%H:%M')}"),
+        log_dir=requested_log_dir,
         config=config,
         host=host,
         port=port

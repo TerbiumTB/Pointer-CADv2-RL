@@ -3,11 +3,17 @@ import re
 import json
 import argparse
 import statistics
-import pandas as pd
 from rich import print
 from loguru import logger
 from collections import Counter
 
+
+def mean_or_na(values):
+    return statistics.mean(values) if values else "N/A"
+
+
+def median_or_na(values):
+    return statistics.median(values) if values else "N/A"
 
 
 def main():
@@ -94,19 +100,21 @@ def main():
         eval_dict["failure"]["detail"][error] = (count / total_failures if total_failures > 0 else 0) * 100
         
     eval_dict['chamfer distance'] = {}
-    eval_dict['chamfer distance']['median'] = statistics.median(chamfer_distance)
-    eval_dict['chamfer distance']['mean'] = statistics.mean(chamfer_distance)
+    eval_dict['chamfer distance']['median'] = median_or_na(chamfer_distance)
+    eval_dict['chamfer distance']['mean'] = mean_or_na(chamfer_distance)
     
     eval_dict['f1'] = {
-        "line": statistics.mean(line_f1),
-        "arc": statistics.mean(arc_f1),
-        "circle": statistics.mean(circle_f1),
-        "extrude": statistics.mean(extrude_f1),
-        "chamfer": statistics.mean(chamfer_f1) if len(chamfer_f1) > 0 else "N/A",
-        "fillet": statistics.mean(fillet_f1) if len(fillet_f1) > 0 else "N/A",
+        "line": mean_or_na(line_f1),
+        "arc": mean_or_na(arc_f1),
+        "circle": mean_or_na(circle_f1),
+        "extrude": mean_or_na(extrude_f1),
+        "chamfer": mean_or_na(chamfer_f1),
+        "fillet": mean_or_na(fillet_f1),
     }
 
-    eval_dict['watertightness'] = statistics.mean(watertightness) * 100
+    eval_dict['watertightness'] = (
+        statistics.mean(watertightness) * 100 if watertightness else "N/A"
+    )
 
     json_formatted_str = json.dumps(eval_dict, indent=4)
     print("\n\n")

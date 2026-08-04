@@ -62,9 +62,12 @@ step stores the exact B-Rep graph visible before generation and behavior-policy
 log-probabilities for all four PointerCAD channels.
 
 Set `generation.max_episodes_per_split` or `generation.task_ids` for a smoke
-subset. A stopped run can be continued with `generation.resume: true`, but the
-stored and requested data-affecting configurations must match. Resume removes
-only uncommitted files for the deterministic trajectory being regenerated.
+subset. Re-running the same run skips committed deterministic trajectory IDs
+and generates only missing trajectories; the stored and requested
+data-affecting configurations must match. Pass `--force` (`-f`) to delete the
+whole `<output_root>/<run_id>` directory and generate it from scratch. A normal
+repeat run removes only uncommitted files for a deterministic trajectory that
+still needs to be generated.
 
 The preference builder reads `config/rl_preferences.yaml`:
 

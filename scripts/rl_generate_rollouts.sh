@@ -75,4 +75,5 @@ echo "[INFO] Log: $LOG_PATH"
 
 python -u -m preprocessing.generate_rl_rollouts \
     -c "$CONFIG_PATH" \
+    "$@" \
     2>&1 | tee "$LOG_PATH"

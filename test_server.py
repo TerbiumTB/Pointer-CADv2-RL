@@ -117,6 +117,7 @@ global_dataset_size = None
 progress_bar = None
 log_dir = None
 finished_clients = 0
+expected_clients = None
 
 # ==================== 日志设置 ====================
 logger.remove()
@@ -126,7 +127,10 @@ logger.add(lambda msg: tqdm.write(msg, end=""), level="INFO", colorize=True,
 # ==================== API 实现 ====================
 @app.post("/connect")
 async def connect(req: ConnectRequest):
-    global global_dataset_size, progress_bar, log_dir
+    global global_dataset_size, progress_bar, log_dir, expected_clients
+
+    if expected_clients is not None and len(clients) >= expected_clients:
+        raise HTTPException(status_code=409, detail="All expected evaluation clients are already connected")
 
     if global_dataset_size is None:
         global_dataset_size = req.dataset_size
@@ -180,7 +184,7 @@ async def report_result(req: ReportRequest):
     else:
         if "chamfer distance" in req.result and req.result["chamfer distance"] is not None:
             cds.append(req.result["chamfer distance"])
-        if "f1" in req.result:
+        if isinstance(req.result.get("f1"), dict):
             for key in f1.keys():
                 if key in req.result["f1"] and req.result["f1"][key] is not None:
                     f1[key].append(req.result["f1"][key])
@@ -206,7 +210,7 @@ async def report_result(req: ReportRequest):
 
 @app.post("/finish")
 async def finish(req: FinishRequest):
-    global finished_clients, log_dir, claimed_model_ids
+    global finished_clients, log_dir, claimed_model_ids, expected_clients
 
     finished_clients += 1
     logger.info(f"Client finished: {req.gpu_info}. Total finished: {finished_clients}/{len(clients)}")
@@ -216,7 +220,8 @@ async def finish(req: FinishRequest):
         json.dump(claimed_model_ids, f, indent=4)
         logger.success(f"Results saved to {output_path}")
 
-    if finished_clients >= len(clients):
+    clients_to_finish = expected_clients if expected_clients is not None else len(clients)
+    if finished_clients >= clients_to_finish:
         logger.info("All clients finished. Shutting down server...")
 
         def shutdown():
@@ -229,14 +234,32 @@ async def finish(req: FinishRequest):
 
 @app.get("/ping")
 async def ping():
-    return {"status": "pong", "clients": len(clients), "finished": finished_clients}
+    return {
+        "status": "pong",
+        "clients": len(clients),
+        "expected_clients": expected_clients,
+        "finished": finished_clients,
+    }
 
 
 # ==================== 主程序入口 ====================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FastAPI server with tqdm and loguru logging.")
     parser.add_argument("-p", "--port", type=int, default=32500, help="Port to run the FastAPI server on")
+    parser.add_argument(
+        "--expected-clients",
+        type=int,
+        default=None,
+        help="Wait for this many clients before shutting down (default: connected clients)",
+    )
     args = parser.parse_args()
 
-    logger.info(f"Starting FastAPI server on port {args.port} with loguru and tqdm support...")
+    if args.expected_clients is not None and args.expected_clients <= 0:
+        parser.error("--expected-clients must be greater than zero")
+    expected_clients = args.expected_clients
+
+    logger.info(
+        f"Starting FastAPI server on port {args.port}; "
+        f"expected clients: {expected_clients or 'dynamic'}"
+    )
     uvicorn.run(app, host="0.0.0.0", port=args.port, log_config=None, access_log=False)

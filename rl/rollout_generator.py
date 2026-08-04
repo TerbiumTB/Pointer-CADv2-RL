@@ -3,9 +3,21 @@ import gc
 import hashlib
 import os
 import random
+import sys
 import time
+from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import (
+    Any,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 import dgl
 import numpy as np
@@ -99,6 +111,25 @@ def set_sampling_seed(seed: int, device: torch.device) -> None:
     torch.manual_seed(seed)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(seed)
+
+
+@contextmanager
+def suppress_native_stdout(enabled: bool) -> Iterator[None]:
+    """Silence verbose native-library stdout while preserving Python logs."""
+    if not enabled:
+        yield
+        return
+
+    sys.stdout.flush()
+    saved_stdout = os.dup(1)
+    try:
+        with open(os.devnull, "w", encoding="utf-8") as null_output:
+            os.dup2(null_output.fileno(), 1)
+            yield
+    finally:
+        sys.stdout.flush()
+        os.dup2(saved_stdout, 1)
+        os.close(saved_stdout)
 
 
 def parameter_map_to_lists(parameter_map: Dict[str, Any]) -> Dict[str, List[float]]:
@@ -277,12 +308,25 @@ class RolloutGenerator:
                 "cad", f"{trajectory_id_value}.step"
             )
             try:
-                environment.model.export_model(
-                    str(destination),
-                    timeout=float(
-                        self.execution.get("build_timeout_seconds", 300.0)
-                    ),
-                )
+                with suppress_native_stdout(
+                    bool(
+                        self.outputs.get(
+                            "suppress_step_export_output", True
+                        )
+                    )
+                ):
+                    exported = environment.model.export_model(
+                        str(destination),
+                        timeout=float(
+                            self.execution.get(
+                                "build_timeout_seconds", 300.0
+                            )
+                        ),
+                    )
+                if exported is False:
+                    raise RuntimeError("STEP writer reported an export failure.")
+                if not destination.is_file():
+                    raise RuntimeError("STEP writer did not create an output file.")
                 cad_path = self.store.relative_path(destination)
             except Exception as exc:
                 errors["step"] = f"{type(exc).__name__}: {exc}"
@@ -296,6 +340,8 @@ class RolloutGenerator:
             try:
                 mesh = create_mesh(environment.model)
                 mesh.export(str(destination))
+                if not destination.is_file():
+                    raise RuntimeError("Mesh exporter did not create an output file.")
                 mesh_path = self.store.relative_path(destination)
             except Exception as exc:
                 errors["mesh"] = f"{type(exc).__name__}: {exc}"
@@ -494,6 +540,78 @@ def _limit_episodes(
     return list(episodes)
 
 
+def _update_rollout_stats(
+    stats: Counter[str], trajectory: TrajectoryRecord
+) -> None:
+    stats["rollouts"] += 1
+    stats["valid"] += int(trajectory.valid)
+    stats["cad_saved"] += int(trajectory.final_cad_path is not None)
+    stats["mesh_saved"] += int(trajectory.final_mesh_path is not None)
+
+
+def _format_termination_counts(counts: Counter[str]) -> str:
+    if not counts:
+        return "none"
+    return ",".join(
+        f"{reason}:{count}" for reason, count in sorted(counts.items())
+    )
+
+
+def _metrics_status(trajectory: TrajectoryRecord) -> str:
+    metrics = trajectory.metrics
+    if "evaluation_error" in metrics:
+        return "error"
+    metric_errors = metrics.get("metric_errors")
+    if isinstance(metric_errors, dict) and metric_errors:
+        return "partial"
+    if "operation_count" in metrics:
+        return "ok"
+    return "not_run"
+
+
+def _trajectory_problem_summary(trajectory: TrajectoryRecord) -> str:
+    problems = []
+    if trajectory.execution_error:
+        problems.append(f"error={trajectory.execution_error}")
+    metrics = trajectory.metrics
+    evaluation_error = metrics.get("evaluation_error")
+    if evaluation_error:
+        problems.append(f"evaluation_error={evaluation_error}")
+    metric_errors = metrics.get("metric_errors")
+    if isinstance(metric_errors, dict) and metric_errors:
+        problems.append(f"metric_errors={','.join(sorted(metric_errors))}")
+    output_errors = metrics.get("output_errors")
+    if isinstance(output_errors, dict):
+        for output_name, error in sorted(output_errors.items()):
+            problems.append(f"{output_name}_export_error={error}")
+    return f" {'; '.join(problems)}" if problems else ""
+
+
+def _log_rollout_result(
+    trajectory: TrajectoryRecord,
+    rollout_position: int,
+    trajectories_per_episode: int,
+    elapsed_seconds: float,
+) -> None:
+    log = logger.info if trajectory.valid else logger.warning
+    log(
+        "Rollout {}/{} for task {} ({}): valid={} termination={} steps={} "
+        "step_export={} mesh_export={} metrics={} elapsed={:.1f}s{}",
+        rollout_position,
+        trajectories_per_episode,
+        trajectory.task_id,
+        trajectory.trajectory_id,
+        trajectory.valid,
+        trajectory.termination_reason,
+        trajectory.num_generated_steps,
+        "saved" if trajectory.final_cad_path is not None else "missing",
+        "saved" if trajectory.final_mesh_path is not None else "missing",
+        _metrics_status(trajectory),
+        elapsed_seconds,
+        _trajectory_problem_summary(trajectory),
+    )
+
+
 def build_runtime_config(
     config: Dict[str, Any], checkpoint_path: Path
 ) -> Dict[str, Any]:
@@ -522,7 +640,11 @@ def validate_rollout_config(config: Dict[str, Any]) -> None:
             raise ValueError(f"Missing rollout config field: {key}")
 
     run_id = str(config["run_id"])
-    if not run_id or Path(run_id).name != run_id:
+    if (
+        not run_id
+        or run_id in {".", ".."}
+        or Path(run_id).name != run_id
+    ):
         raise ValueError(f"run_id must be a safe directory name: {run_id!r}")
     if not str(config["generator_version"]).strip():
         raise ValueError("generator_version must be non-empty.")
@@ -592,7 +714,7 @@ def validate_rollout_config(config: Dict[str, Any]) -> None:
             raise ValueError(f"execution.{key} must be positive.")
 
 
-def generate_rollouts(config: Dict[str, Any]) -> Path:
+def generate_rollouts(config: Dict[str, Any], force: bool = False) -> Path:
     validate_rollout_config(config)
     model_config = config["model"]
     checkpoint_path = Path(model_config["checkpoint_path"])
@@ -601,15 +723,23 @@ def generate_rollouts(config: Dict[str, Any]) -> Path:
     runtime_config = build_runtime_config(config, checkpoint_path)
 
     run_id = str(config["run_id"])
-    rollout_root = Path(config["output_root"]) / run_id
-    resume = bool(config["generation"].get("resume", False))
-    store = RolloutStore.create(
-        rollout_root, runtime_config, exist_ok=resume
-    )
-    existing_ids = {
-        trajectory.trajectory_id
+    output_root = Path(config["output_root"])
+    rollout_root = output_root / run_id
+    if "resume" in config["generation"]:
+        logger.warning(
+            "generation.resume is deprecated and ignored; rollout generation "
+            "now skips existing trajectories by default. Use --force/-f to "
+            "recreate the whole run."
+        )
+    if force:
+        logger.warning("Force enabled: removing rollout run {}", rollout_root)
+        RolloutStore.remove_existing(rollout_root, expected_parent=output_root)
+    store = RolloutStore.create(rollout_root, runtime_config, exist_ok=True)
+    existing_trajectories = {
+        trajectory.trajectory_id: trajectory
         for trajectory in load_trajectories(str(rollout_root))
     }
+    existing_ids = set(existing_trajectories)
 
     requested_device = torch.device(model_config.get("device", "cuda"))
     if requested_device.type == "cuda":
@@ -662,11 +792,19 @@ def generate_rollouts(config: Dict[str, Any]) -> Path:
     pending_trajectories: List[TrajectoryRecord] = []
     pending_steps: List[StepRecord] = []
     pending_ids: Set[str] = set()
+    run_stats: Counter[str] = Counter()
+    run_terminations: Counter[str] = Counter()
 
     def flush_pending() -> None:
         if not pending_trajectories:
             return
         store.append(pending_trajectories, pending_steps)
+        existing_trajectories.update(
+            {
+                trajectory.trajectory_id: trajectory
+                for trajectory in pending_trajectories
+            }
+        )
         existing_ids.update(pending_ids)
         pending_trajectories.clear()
         pending_steps.clear()
@@ -679,17 +817,32 @@ def generate_rollouts(config: Dict[str, Any]) -> Path:
                 split,
                 generation_config,
             )
+            split_stats: Counter[str] = Counter()
+            split_terminations: Counter[str] = Counter()
             progress = tqdm(
-                episodes,
+                total=len(episodes) * trajectories_per_episode,
                 desc=f"rollouts:{split}",
+                unit="rollout",
                 dynamic_ncols=True,
             )
-            for episode in progress:
+            for episode_position, episode in enumerate(episodes, start=1):
+                episode_started_at = time.monotonic()
+                episode_stats: Counter[str] = Counter()
+                episode_terminations: Counter[str] = Counter()
                 target_model = load_target_model(
                     Path(config["source_dataset_root"]),
                     episode.target_cad_path,
                 )
+                logger.info(
+                    "Task {}/{} {}: generating {} rollouts; target_operations={}",
+                    episode_position,
+                    len(episodes),
+                    episode.task_id,
+                    trajectories_per_episode,
+                    len(target_model.seq),
+                )
                 for rollout_index in range(trajectories_per_episode):
+                    rollout_position = rollout_index + 1
                     seed = trajectory_seed(
                         base_seed, episode.task_id, rollout_index
                     )
@@ -700,17 +853,40 @@ def generate_rollouts(config: Dict[str, Any]) -> Path:
                         seed,
                     )
                     if identifier in existing_ids:
-                        if not resume:
-                            raise ValueError(
-                                f"Duplicate trajectory ID: {identifier}"
-                            )
+                        trajectory = existing_trajectories[identifier]
+                        _update_rollout_stats(episode_stats, trajectory)
+                        _update_rollout_stats(split_stats, trajectory)
+                        _update_rollout_stats(run_stats, trajectory)
+                        episode_stats["skipped_existing"] += 1
+                        split_stats["skipped_existing"] += 1
+                        run_stats["skipped_existing"] += 1
+                        episode_terminations[trajectory.termination_reason] += 1
+                        split_terminations[trajectory.termination_reason] += 1
+                        run_terminations[trajectory.termination_reason] += 1
+                        progress.update(1)
+                        progress.set_postfix(
+                            episode=f"{episode_position}/{len(episodes)}",
+                            task=episode.task_id,
+                            rollout=(
+                                f"{rollout_position}/"
+                                f"{trajectories_per_episode}"
+                            ),
+                            task_valid=(
+                                f"{episode_stats['valid']}/"
+                                f"{episode_stats['rollouts']}"
+                            ),
+                            total_valid=(
+                                f"{split_stats['valid']}/"
+                                f"{split_stats['rollouts']}"
+                            ),
+                        )
                         continue
                     if identifier in pending_ids:
                         raise ValueError(
                             f"Duplicate pending trajectory ID: {identifier}"
                         )
-                    if resume:
-                        store.discard_uncommitted_data(identifier)
+                    store.discard_uncommitted_data(identifier)
+                    rollout_started_at = time.monotonic()
                     trajectory, steps = generator.generate(
                         episode=episode,
                         rollout_index=rollout_index,
@@ -721,21 +897,95 @@ def generate_rollouts(config: Dict[str, Any]) -> Path:
                     pending_trajectories.append(trajectory)
                     pending_steps.extend(steps)
                     pending_ids.add(identifier)
-                    if not trajectory.valid:
-                        logger.warning(
-                            "Invalid rollout {}: {} ({})",
-                            identifier,
-                            trajectory.termination_reason,
-                            trajectory.execution_error,
-                        )
+                    _update_rollout_stats(episode_stats, trajectory)
+                    _update_rollout_stats(split_stats, trajectory)
+                    _update_rollout_stats(run_stats, trajectory)
+                    episode_stats["generated"] += 1
+                    split_stats["generated"] += 1
+                    run_stats["generated"] += 1
+                    episode_terminations[trajectory.termination_reason] += 1
+                    split_terminations[trajectory.termination_reason] += 1
+                    run_terminations[trajectory.termination_reason] += 1
+                    _log_rollout_result(
+                        trajectory,
+                        rollout_position,
+                        trajectories_per_episode,
+                        time.monotonic() - rollout_started_at,
+                    )
                     if len(pending_trajectories) >= write_shard_size:
                         flush_pending()
+                    progress.update(1)
                     progress.set_postfix(
+                        episode=f"{episode_position}/{len(episodes)}",
                         task=episode.task_id,
-                        valid=trajectory.valid,
+                        rollout=(
+                            f"{rollout_position}/{trajectories_per_episode}"
+                        ),
+                        task_valid=(
+                            f"{episode_stats['valid']}/"
+                            f"{episode_stats['rollouts']}"
+                        ),
+                        total_valid=(
+                            f"{split_stats['valid']}/"
+                            f"{split_stats['rollouts']}"
+                        ),
                     )
                     gc.collect()
                     if device.type == "cuda":
                         torch.cuda.empty_cache()
+                logger.info(
+                    "Task {}/{} {} complete: valid(model_end)={}/{} "
+                    "step_export={}/{} mesh_export={}/{} generated={} "
+                    "skipped_existing={} terminations={} elapsed={:.1f}s",
+                    episode_position,
+                    len(episodes),
+                    episode.task_id,
+                    episode_stats["valid"],
+                    episode_stats["rollouts"],
+                    episode_stats["cad_saved"],
+                    episode_stats["rollouts"],
+                    episode_stats["mesh_saved"],
+                    episode_stats["rollouts"],
+                    episode_stats["generated"],
+                    episode_stats["skipped_existing"],
+                    _format_termination_counts(episode_terminations),
+                    time.monotonic() - episode_started_at,
+                )
+            progress.close()
+            flush_pending()
+            logger.info(
+                "Split {} complete: tasks={} rollouts={} valid(model_end)={}/{} "
+                "step_export={}/{} mesh_export={}/{} generated={} "
+                "skipped_existing={} "
+                "terminations={}",
+                split,
+                len(episodes),
+                split_stats["rollouts"],
+                split_stats["valid"],
+                split_stats["rollouts"],
+                split_stats["cad_saved"],
+                split_stats["rollouts"],
+                split_stats["mesh_saved"],
+                split_stats["rollouts"],
+                split_stats["generated"],
+                split_stats["skipped_existing"],
+                _format_termination_counts(split_terminations),
+            )
         flush_pending()
+    logger.info(
+        "Rollout run {} complete: rollouts={} valid(model_end)={}/{} "
+        "step_export={}/{} mesh_export={}/{} generated={} skipped_existing={} "
+        "terminations={}",
+        run_id,
+        run_stats["rollouts"],
+        run_stats["valid"],
+        run_stats["rollouts"],
+        run_stats["cad_saved"],
+        run_stats["rollouts"],
+        run_stats["mesh_saved"],
+        run_stats["rollouts"],
+        run_stats["generated"],
+        run_stats["skipped_existing"],
+        _format_termination_counts(run_terminations),
+    )
     return rollout_root
