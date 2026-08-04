@@ -127,7 +127,7 @@ class PointerCAD(nn.Module):
                     assert length_idx.max() < batch_param_embeds["length"].shape[0]
                     length_embeds: torch.Tensor = self.parameter_projection(batch_param_embeds["length"][length_idx])
                     assert length_embeds.shape[0] == length_mask.sum()
-                    label_embeds[length_mask] += length_embeds
+                    label_embeds[length_mask] += length_embeds.type_as(label_embeds)
                 
                 angle_mask = batch_label[:total_cad_num] == TOKEN.index("<|angle_value|>")
                 if torch.any(angle_mask):
@@ -136,7 +136,7 @@ class PointerCAD(nn.Module):
                     assert angle_idx.max() < batch_param_embeds["angle"].shape[0]
                     angle_embeds: torch.Tensor = self.parameter_projection(batch_param_embeds["angle"][angle_idx])
                     assert angle_embeds.shape[0] == angle_mask.sum()
-                    label_embeds[angle_mask] += angle_embeds
+                    label_embeds[angle_mask] += angle_embeds.type_as(label_embeds)
 
                 ##################  Build Pointer Embeded  ##################
                 valid_srf_crv_mask = batch_pointer[:total_cad_num] >= 0
@@ -172,7 +172,11 @@ class PointerCAD(nn.Module):
 
                     assert label_embeds_idx.shape[0] == pointer_embeds.shape[0]
 
-                    label_embeds = label_embeds.index_add(0, label_embeds_idx, pointer_embeds)
+                    label_embeds = label_embeds.index_add(
+                        0,
+                        label_embeds_idx,
+                        pointer_embeds.type_as(label_embeds),
+                    )
 
                 cad_feature.append(label_embeds)
 

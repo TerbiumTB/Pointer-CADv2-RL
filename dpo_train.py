@@ -21,6 +21,20 @@ from rl.dpo_data import PointerCADDataset, collate_dpo_pairs
 from rl.likelihood import ScoringTemperatures
 
 
+def torch_dtype(name: str) -> torch.dtype:
+    mapping = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }
+    try:
+        return mapping[str(name).lower()]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported model dtype {name!r}; expected {sorted(mapping)}."
+        ) from exc
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -139,11 +153,12 @@ def evaluate(
     metric_names = None
     local_sums = None
     for pairs in dataloader:
-        output = objective.compute(
-            policy_model=policy,
-            pairs=pairs,
-            device=accelerator.device,
-        )
+        with accelerator.autocast():
+            output = objective.compute(
+                policy_model=policy,
+                pairs=pairs,
+                device=accelerator.device,
+            )
         if metric_names is None:
             metric_names = sorted(output.metrics)
             local_sums = torch.zeros(
@@ -209,7 +224,17 @@ def main() -> None:
     )
 
     model_config = config["model"]
-    policy = PointerCAD(qwen_model=model_config["base_model"])
+    model_dtype = torch_dtype(model_config.get("dtype", "bfloat16"))
+    logger.info(
+        "Loading policy and reference weights with model dtype {} and "
+        "mixed precision {}",
+        model_dtype,
+        accelerator.mixed_precision,
+    )
+    policy = PointerCAD(
+        qwen_model=model_config["base_model"],
+        dtype=model_dtype,
+    )
     load_model_checkpoint(policy, model_config["checkpoint_path"])
 
     reference_model = None
@@ -222,7 +247,10 @@ def main() -> None:
         ):
             reference_model = copy.deepcopy(policy)
         else:
-            reference_model = PointerCAD(qwen_model=model_config["base_model"])
+            reference_model = PointerCAD(
+                qwen_model=model_config["base_model"],
+                dtype=model_dtype,
+            )
             load_model_checkpoint(reference_model, reference_path)
         reference_model.eval()
         for parameter in reference_model.parameters():
@@ -288,11 +316,12 @@ def main() -> None:
         policy.train()
         for batch_index, pairs in enumerate(train_loader):
             with accelerator.accumulate(policy):
-                output = objective.compute(
-                    policy_model=policy,
-                    pairs=pairs,
-                    device=accelerator.device,
-                )
+                with accelerator.autocast():
+                    output = objective.compute(
+                        policy_model=policy,
+                        pairs=pairs,
+                        device=accelerator.device,
+                    )
                 accelerator.backward(output.loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(policy.parameters(), max_grad_norm)
