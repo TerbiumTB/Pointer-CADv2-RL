@@ -1,4 +1,4 @@
-run_id: "sft-05b-k5"
+run_id: "sft-05b-k5-20260804"
 generator_version: "rollout-generator-v1"
 episodes_root: "/home/terbium/datasets/paramcad-addon/format/pointercad-rl/episodes"
 source_dataset_root: "/mnt/afs_01e/mayi-folder/ParamCAD/dataset/paramcad-addon/dataset-addon"
@@ -9,7 +9,7 @@ splits:
 
 model:
   base_model: "Qwen/Qwen2.5-0.5B-Instruct"
-  checkpoint_path: "/path/to/sft/model.pth"
+  checkpoint_path: "/home/terbium/PointerCADv2-RL/log/sft-checkpoints/addon-0.5B-model.pth"
   device: "cuda"
   dtype: "bfloat16"
 
