@@ -14,15 +14,22 @@ profiles:
     output_dir: "/path/to/subsets/pointercad-smoke"
     seed: 42
     materialization: copy
-    split: train
-    num_chunks: 3
-    models_per_chunk: 4
     max_sampling_attempts: 2000
-    requirements:
-      min_multistep_models: 3
-      min_fillet_models: 1
-      min_chamfer_models: 1
-      min_plain_models: 3
+    splits:
+      train:
+        num_chunks: 3
+        models_per_chunk: 4
+        requirements:
+          min_multistep_models: 3
+          min_fillet_models: 1
+          min_chamfer_models: 1
+          min_plain_models: 3
+      validation:
+        num_chunks: 2
+        models_per_chunk: 4
+        requirements:
+          min_multistep_models: 2
+          min_plain_models: 2
 
   # Roughly 15k SFT step records. Whole-model selection can cause a small
   # difference from the target, which the validator bounds with tolerance.

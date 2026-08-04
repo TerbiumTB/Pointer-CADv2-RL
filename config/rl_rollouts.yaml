@@ -29,7 +29,6 @@ generation:
   write_shard_size: 64
   max_episodes_per_split: null
   task_ids: null
-  resume: false
   temperatures:
     plan: 1.0
     label: 1.0

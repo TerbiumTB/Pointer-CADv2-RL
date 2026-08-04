@@ -11,8 +11,10 @@ model in different splits. In this tooling:
 
 The default config contains two profiles:
 
-- `smoke`: 3 chunks × 4 models, including multi-step, fillet, chamfer, and
-  models containing neither fillet nor chamfer;
+- `smoke`: independent train and validation samples. The default selects
+  3 train chunks × 4 models and 2 validation chunks × 4 models; train covers
+  multi-step, fillet, chamfer and plain models, while validation covers
+  multi-step and plain models;
 - `train_small`: approximately 15,000 records split 90/5/5 between train,
   validation, and test.
 

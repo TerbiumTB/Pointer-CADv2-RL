@@ -152,19 +152,29 @@ class PointerCAD(nn.Module):
                 crv_idx = torch.nonzero(crv_mask, as_tuple=False).squeeze(1)
                 plane_idx = torch.nonzero(plane_mask, as_tuple=False).squeeze(1)
 
-                pointer_valid = torch.empty((valid_idx.size(0), self.pointer_size), device=batch_pointer.device)
+                pointer_valid = torch.empty(
+                    (valid_idx.size(0), self.pointer_size),
+                    dtype=label_embeds.dtype,
+                    device=batch_pointer.device,
+                )
 
                 if srf_idx.numel() > 0:
                     valid_srf_idx = torch.nonzero(srf_mask[valid_idx], as_tuple=False).squeeze(1)
-                    pointer_valid[valid_srf_idx] = batch_pointer_srf[batch_pointer[srf_idx]]
+                    pointer_valid[valid_srf_idx] = batch_pointer_srf[
+                        batch_pointer[srf_idx]
+                    ].type_as(pointer_valid)
 
                 if crv_idx.numel() > 0:
                     valid_crv_idx = torch.nonzero(crv_mask[valid_idx], as_tuple=False).squeeze(1)
-                    pointer_valid[valid_crv_idx] = batch_pointer_crv[batch_pointer[crv_idx]]
+                    pointer_valid[valid_crv_idx] = batch_pointer_crv[
+                        batch_pointer[crv_idx]
+                    ].type_as(pointer_valid)
 
                 if plane_idx.numel() > 0:
                     valid_plane_idx = torch.nonzero(plane_mask[valid_idx], as_tuple=False).squeeze(1)
-                    pointer_valid[valid_plane_idx] = self.standard_plane_pointer[batch_pointer[plane_idx] + len(STANDARD_PLANES)]
+                    pointer_valid[valid_plane_idx] = self.standard_plane_pointer[
+                        batch_pointer[plane_idx] + len(STANDARD_PLANES)
+                    ].type_as(pointer_valid)
 
                 if valid_idx.numel():
                     pointer_embeds = self.pointer_projection(pointer_valid)

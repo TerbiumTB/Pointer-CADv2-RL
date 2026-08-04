@@ -49,13 +49,7 @@ def _requirements(manifest: Mapping[str, object]) -> Mapping[str, object]:
     if not isinstance(sampling, dict):
         return {}
     if sampling.get("mode") == "smoke":
-        explicit = sampling.get("requirements", {})
-        result = dict(explicit) if isinstance(explicit, dict) else {}
-        result["min_chunks"] = int(sampling.get("num_chunks", 0))
-        result["min_models_per_chunk"] = int(
-            sampling.get("models_per_chunk", 0)
-        )
-        return result
+        return {}
 
     result = {}
     total_target = sum(
@@ -69,6 +63,71 @@ def _requirements(manifest: Mapping[str, object]) -> Mapping[str, object]:
     if isinstance(validation_requirements, dict):
         result.update(validation_requirements)
     return result
+
+
+def _smoke_split_errors(
+    report: Mapping[str, object], sampling: Mapping[str, object]
+) -> list[str]:
+    split_configs = sampling.get("splits")
+    if not isinstance(split_configs, dict):
+        return ["smoke.splits must be a mapping"]
+
+    errors = []
+    required = {"train", "validation"}
+    missing = sorted(required - set(split_configs))
+    if missing:
+        errors.append(
+            f"smoke.splits is missing required splits: {', '.join(missing)}"
+        )
+
+    by_split = report["by_split"]
+    by_split_chunk = report["models_per_split_chunk"]
+    requirement_names = (
+        "multistep_models",
+        "fillet_models",
+        "chamfer_models",
+        "plain_models",
+    )
+    for split, split_config in split_configs.items():
+        if split not in ("train", "validation", "test"):
+            errors.append(f"unsupported smoke split: {split}")
+            continue
+        if not isinstance(split_config, dict):
+            errors.append(f"smoke.splits.{split} must be a mapping")
+            continue
+        expected_chunks = int(split_config["num_chunks"])
+        expected_models_per_chunk = int(split_config["models_per_chunk"])
+        split_counts = by_split[split]
+        chunk_counts = by_split_chunk[split]
+        if split_counts["chunks"] != expected_chunks:
+            errors.append(
+                f"{split} chunks: found {split_counts['chunks']}, "
+                f"expected {expected_chunks}"
+            )
+        for chunk, count in chunk_counts.items():
+            if count != expected_models_per_chunk:
+                errors.append(
+                    f"{split} chunk {chunk}: found {count} models, "
+                    f"expected {expected_models_per_chunk}"
+                )
+        expected_models = expected_chunks * expected_models_per_chunk
+        if split_counts["models"] != expected_models:
+            errors.append(
+                f"{split} models: found {split_counts['models']}, "
+                f"expected {expected_models}"
+            )
+        requirements = split_config.get("requirements", {})
+        if not isinstance(requirements, dict):
+            errors.append(f"smoke.splits.{split}.requirements must be a mapping")
+            continue
+        for name in requirement_names:
+            minimum = int(requirements.get(f"min_{name}", 0))
+            if split_counts[name] < minimum:
+                errors.append(
+                    f"{split} {name}: found {split_counts[name]}, "
+                    f"expected at least {minimum}"
+                )
+    return errors
 
 
 def main() -> None:
@@ -97,6 +156,10 @@ def main() -> None:
         prompt_variants=manifest.get("prompt_variants", ["abs", "exp"]),
         check_files=not args.skip_file_check,
     )
+    sampling = manifest.get("sampling", {})
+    if isinstance(sampling, dict) and sampling.get("mode") == "smoke":
+        report["errors"].extend(_smoke_split_errors(report, sampling))
+        report["ok"] = not report["errors"]
     targets = manifest.get("target_step_records_by_split", {})
     if isinstance(targets, dict) and targets:
         tolerance = int(manifest.get("sampling", {}).get("record_tolerance", 100))

@@ -69,6 +69,11 @@ def load_model_checkpoint(model, checkpoint_path: str) -> None:
         )
 
 
+def set_deterministic_likelihood_mode(model) -> None:
+    """Disable dropout and running-stat updates without disabling gradients."""
+    model.eval()
+
+
 def save_checkpoint(
     accelerator: Accelerator,
     model,
@@ -222,6 +227,13 @@ def main() -> None:
     validation_loader = make_dataloader(
         config, "validation", cached_reference_hash
     )
+    if len(train_loader.dataset) == 0:
+        raise ValueError("DPO training preference view is empty.")
+    if len(validation_loader.dataset) == 0:
+        logger.warning(
+            "DPO validation preference view is empty; validation metrics will "
+            "not be available."
+        )
 
     model_config = config["model"]
     model_dtype = torch_dtype(model_config.get("dtype", "bfloat16"))
@@ -290,7 +302,16 @@ def main() -> None:
         policy, optimizer, train_loader, validation_loader, scheduler
     )
     if reference_model is not None:
-        reference_model.to(accelerator.device)
+        reference_model = accelerator.prepare_model(
+            reference_model,
+            evaluation_mode=True,
+        )
+        set_deterministic_likelihood_mode(reference_model)
+    set_deterministic_likelihood_mode(policy)
+    logger.info(
+        "DPO policy and reference likelihoods use eval mode to disable dropout "
+        "and BatchNorm running-stat updates; policy gradients remain enabled."
+    )
 
     temperatures = ScoringTemperatures(**config.get("scoring_temperatures", {}))
     objective = PointerCADDPO(
@@ -313,7 +334,7 @@ def main() -> None:
     optimizer.zero_grad()
 
     for epoch in range(int(training["num_epochs"])):
-        policy.train()
+        set_deterministic_likelihood_mode(policy)
         for batch_index, pairs in enumerate(train_loader):
             with accelerator.accumulate(policy):
                 with accelerator.autocast():
@@ -369,11 +390,17 @@ def main() -> None:
                 validation_loader,
             )
             if accelerator.is_main_process:
-                summary = " ".join(
-                    f"{name}={value:.4f}"
-                    for name, value in sorted(validation_metrics.items())
-                )
-                logger.info("validation epoch={} {}", epoch + 1, summary)
+                if validation_metrics:
+                    summary = " ".join(
+                        f"{name}={value:.4f}"
+                        for name, value in sorted(validation_metrics.items())
+                    )
+                    logger.info("validation epoch={} {}", epoch + 1, summary)
+                else:
+                    logger.warning(
+                        "validation epoch={} skipped: no preference pairs",
+                        epoch + 1,
+                    )
 
     save_checkpoint(
         accelerator,

@@ -287,6 +287,20 @@ Pending records записываются в Parquet перед итоговой 
 `<output_root>/<run_id>` целиком и создаёт run заново; несовпадающий runtime
 config без `--force` считается ошибкой.
 
+RL smoke subset использует обязательный multi-split контракт
+`profiles.smoke.splits`: как минимум отдельные `train` и `validation` specs с
+собственными `num_chunks`, `models_per_chunk` и requirements. Старый
+single-split `profiles.smoke.split` не поддерживается. Текущий default выбирает
+12 train и 8 validation CAD-моделей; последующие episode, rollout и preference
+builders уже сохраняют это разделение.
+
+DPO likelihood для обучаемой policy и frozen reference вычисляется в
+детерминированном `eval` mode. Это отключает dropout и обновление BatchNorm
+running statistics, но не autograd и не optimizer updates. Reference model
+подготавливается Accelerate с `evaluation_mode=True`, чтобы policy и reference
+использовали одинаковый mixed-precision forward. При одинаковом начальном
+checkpoint первый DPO loss до update должен быть близок к `log(2)`.
+
 ## Что пока не реализовано
 
 - Изолированный CAD executor для rollout workers.

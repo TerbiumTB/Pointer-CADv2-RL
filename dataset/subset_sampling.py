@@ -280,7 +280,7 @@ def _requirements_met(
     )
 
 
-def sample_smoke_models(
+def _sample_smoke_split_models(
     models: Sequence[ModelInfo],
     config: Mapping[str, object],
     rng: random.Random,
@@ -406,6 +406,56 @@ def sample_smoke_models(
         "Could not satisfy smoke sampling constraints after "
         f"{attempts} attempts and {len(operation_cache)} inspected models. "
         f"Best sampled candidate counts: {best_counts}"
+    )
+
+
+def sample_smoke_models(
+    models: Sequence[ModelInfo],
+    config: Mapping[str, object],
+    rng: random.Random,
+    dataset_dir: Path,
+) -> List[ModelInfo]:
+    """Sample independent train and validation model sets for RL smoke tests."""
+    split_configs = config.get("splits")
+    if not isinstance(split_configs, dict):
+        raise ValueError("smoke.splits must be a mapping.")
+
+    required_splits = {"train", "validation"}
+    missing = sorted(required_splits - set(split_configs))
+    unknown = sorted(set(split_configs) - set(SPLITS))
+    if missing:
+        raise ValueError(
+            f"smoke.splits is missing required splits: {', '.join(missing)}"
+        )
+    if unknown:
+        raise ValueError(
+            f"smoke.splits contains unsupported splits: {', '.join(unknown)}"
+        )
+
+    selected: List[ModelInfo] = []
+    for split in SPLITS:
+        if split not in split_configs:
+            continue
+        split_config = split_configs[split]
+        if not isinstance(split_config, dict):
+            raise ValueError(f"smoke.splits.{split} must be a mapping.")
+        sampling_config = dict(split_config)
+        sampling_config["split"] = split
+        sampling_config.setdefault(
+            "max_sampling_attempts",
+            int(config.get("max_sampling_attempts", 2000)),
+        )
+        selected.extend(
+            _sample_smoke_split_models(
+                models,
+                sampling_config,
+                rng,
+                dataset_dir=dataset_dir,
+            )
+        )
+    return sorted(
+        selected,
+        key=lambda item: (item.split, item.chunk, item.model_id),
     )
 
 
@@ -681,6 +731,16 @@ def validate_subset(
         split: model_counts([model for model in models if model.split == split])
         for split in SPLITS
     }
+    models_per_split_chunk = {
+        split: dict(
+            sorted(
+                Counter(
+                    model.chunk for model in models if model.split == split
+                ).items()
+            )
+        )
+        for split in SPLITS
+    }
     operation_histogram = Counter(
         operation_type
         for model in models
@@ -696,6 +756,7 @@ def validate_subset(
         "errors": errors,
         "counts": counts,
         "by_split": by_split,
+        "models_per_split_chunk": models_per_split_chunk,
         "models_per_chunk": dict(sorted(per_chunk_models.items())),
         "operation_types": dict(sorted(operation_histogram.items())),
         "missing_files": missing_files,
