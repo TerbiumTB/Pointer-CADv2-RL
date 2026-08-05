@@ -1,6 +1,7 @@
 import argparse
 import copy
 import datetime
+import gc
 import math
 import os
 from pathlib import Path
@@ -55,7 +56,18 @@ def load_yaml(path: str) -> Dict:
 
 
 def load_model_checkpoint(model, checkpoint_path: str) -> None:
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint_path = Path(checkpoint_path)
+    logger.info(
+        "Loading checkpoint {} ({:.2f} GiB) with CPU mmap",
+        checkpoint_path,
+        checkpoint_path.stat().st_size / (1024**3),
+    )
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        mmap=True,
+        weights_only=False,
+    )
     state_dict = checkpoint.get("model", checkpoint)
     missing = model.load_state_dict(state_dict, strict=False)
     if missing.missing_keys:
@@ -67,6 +79,9 @@ def load_model_checkpoint(model, checkpoint_path: str) -> None:
         logger.warning(
             "Unexpected checkpoint keys: {}", missing.unexpected_keys
         )
+    del state_dict
+    del checkpoint
+    gc.collect()
 
 
 def set_deterministic_likelihood_mode(model) -> None:
@@ -248,6 +263,9 @@ def main() -> None:
         dtype=model_dtype,
     )
     load_model_checkpoint(policy, model_config["checkpoint_path"])
+    policy.to(accelerator.device)
+    gc.collect()
+    logger.info("Policy weights loaded on {}", accelerator.device)
 
     reference_model = None
     if reference_mode == "model":
@@ -264,6 +282,8 @@ def main() -> None:
                 dtype=model_dtype,
             )
             load_model_checkpoint(reference_model, reference_path)
+            reference_model.to(accelerator.device)
+            gc.collect()
         reference_model.eval()
         for parameter in reference_model.parameters():
             parameter.requires_grad = False

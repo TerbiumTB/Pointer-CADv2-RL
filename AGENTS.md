@@ -274,6 +274,15 @@ OpenCascade execution выполняются последовательно. Ф�
 этого решения, поэтому worker isolation можно добавить после smoke-test
 реального окружения.
 
+Ошибки построения сгенерированной операции, включая `AssertionError` из
+chamfer/fillet/OpenCascade-кода, являются результатом trajectory, а не ошибкой
+всего rollout run: невалидная операция откатывается, step и trajectory
+завершаются с `execution_error`, после чего генерация продолжается. Ошибка
+парсинга target CAD через `AssertionError` отключает только geometry metrics
+соответствующей задачи и сохраняется как `target_model_error`. Дополнительная
+per-rollout граница ловит непредвиденные Python exceptions как `rollout_error`,
+не останавливая split.
+
 Progress rollout generator считается по отдельным trajectories, а не по
 episode-задачам. Для каждой задачи логи отдельно показывают число trajectories,
 завершившихся через `model_end`, число сохранённых STEP/mesh и распределение
@@ -363,6 +372,11 @@ schema/data builders на маленьких subsets и другие проце�
 generation или другие тяжёлые GPU jobs. Такие запуски выполняет пользователь на
 сервере. До серверного запуска локально проверять синтаксис, config parsing и
 другие CPU-safe части, если это возможно.
+
+Большие model checkpoints в DPO trainer и rollout generator загружаются через
+CPU mmap, а временный checkpoint state освобождается сразу после переноса весов.
+Не возвращать обычный `torch.load(..., map_location="cpu")`: он создаёт лишний
+пик host RAM и может приводить к внешнему `SIGKILL` от cgroup/OOM killer.
 
 На сервере репозиторий доступен по symbolic link
 `/home/terbium/PointerCADv2-RL`. Серверные scripts/configs могут использовать этот путь,

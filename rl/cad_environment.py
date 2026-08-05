@@ -189,15 +189,25 @@ class CADEnvironment:
         if not vector:
             raise ValueError("Generated CAD action sequence is empty.")
         previous_length = len(self.model.seq)
-        model_end = self.model.from_vector(
-            vector,
-            parameters=parameter_map,
-            strict=self.strict,
-        )
-        if len(self.model.seq) != previous_length + 1:
-            raise RuntimeError("CAD execution did not append exactly one operation.")
-        if self.model.build_model(timeout=self.build_timeout_seconds) is None:
-            raise RuntimeError("CAD operation produced no valid solid.")
+        previous_operations = list(self.model.seq)
+        try:
+            model_end = self.model.from_vector(
+                vector,
+                parameters=parameter_map,
+                strict=self.strict,
+            )
+            if len(self.model.seq) != previous_length + 1:
+                raise RuntimeError(
+                    "CAD execution did not append exactly one operation."
+                )
+            if self.model.build_model(timeout=self.build_timeout_seconds) is None:
+                raise RuntimeError("CAD operation produced no valid solid.")
+        except Exception:
+            # from_vector appends before build_model validates the operation. Keep
+            # the environment at the last valid B-Rep when chamfer/fillet/OCC
+            # construction fails so the partial trajectory can still be saved.
+            self.model = CADModel(seq=previous_operations)
+            raise
         return model_end, time.monotonic() - started_at
 
 

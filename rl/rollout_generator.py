@@ -5,6 +5,7 @@ import os
 import random
 import sys
 import time
+import traceback
 from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
@@ -53,11 +54,31 @@ def file_sha256(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
             if not chunk:
                 break
             digest.update(chunk)
+        if hasattr(os, "posix_fadvise") and hasattr(
+            os, "POSIX_FADV_DONTNEED"
+        ):
+            try:
+                os.posix_fadvise(
+                    file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED
+                )
+            except OSError:
+                pass
     return digest.hexdigest()
 
 
 def load_checkpoint(model, checkpoint_path: Path) -> None:
-    checkpoint = torch.load(str(checkpoint_path), map_location="cpu")
+    checkpoint_path = Path(checkpoint_path)
+    logger.info(
+        "Loading checkpoint {} ({:.2f} GiB) with CPU mmap",
+        checkpoint_path,
+        checkpoint_path.stat().st_size / (1024**3),
+    )
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        mmap=True,
+        weights_only=False,
+    )
     state_dict = checkpoint.get("model", checkpoint)
     incompatible = model.load_state_dict(state_dict, strict=False)
     if incompatible.missing_keys:
@@ -71,6 +92,9 @@ def load_checkpoint(model, checkpoint_path: Path) -> None:
         logger.warning(
             "Unexpected checkpoint keys: {}", incompatible.unexpected_keys
         )
+    del state_dict
+    del checkpoint
+    gc.collect()
 
 
 def torch_dtype(name: str):
@@ -145,6 +169,20 @@ def parameter_map_to_lists(parameter_map: Dict[str, Any]) -> Dict[str, List[floa
         else:
             result[name] = [float(item) for item in value]
     return result
+
+
+def exception_summary(exc: Exception) -> str:
+    """Return a useful one-line error even for message-less assertions."""
+    message = str(exc).strip()
+    summary = type(exc).__name__
+    if message:
+        summary = f"{summary}: {message}"
+    extracted = traceback.extract_tb(exc.__traceback__)
+    if extracted:
+        frame = extracted[-1]
+        location = f"{Path(frame.filename).name}:{frame.lineno}"
+        summary = f"{summary} ({location})"
+    return summary
 
 
 def decode_step_generation(
@@ -355,7 +393,8 @@ class RolloutGenerator:
         rollout_index: int,
         seed: int,
         trajectory_id_value: str,
-        target_model,
+        target_model=None,
+        target_model_error: Optional[str] = None,
     ) -> Tuple[TrajectoryRecord, List[StepRecord]]:
         set_sampling_seed(seed, self.device)
         environment = self._environment()
@@ -383,7 +422,7 @@ class RolloutGenerator:
                 state_relative_path = self.store.relative_path(state_path)
             except Exception as exc:
                 termination_reason = "state_graph_error"
-                trajectory_error = f"{type(exc).__name__}: {exc}"
+                trajectory_error = exception_summary(exc)
                 break
 
             generation_started_at = time.monotonic()
@@ -402,7 +441,7 @@ class RolloutGenerator:
                 ) = decoded
             except Exception as exc:
                 termination_reason = "generation_error"
-                trajectory_error = f"{type(exc).__name__}: {exc}"
+                trajectory_error = exception_summary(exc)
                 break
             finally:
                 generation_seconds += (
@@ -426,7 +465,7 @@ class RolloutGenerator:
                     f"{trajectory_id_value}:state:{step_index + 1:04d}"
                 )
             except Exception as exc:
-                execution_error = f"{type(exc).__name__}: {exc}"
+                execution_error = exception_summary(exc)
                 step_errors.append(execution_error)
             finally:
                 execution_seconds += (
@@ -468,32 +507,33 @@ class RolloutGenerator:
             "termination_reason": termination_reason,
             "step_execution_errors": step_errors,
         }
+        if target_model_error is not None:
+            metrics["target_model_error"] = target_model_error
         final_cad_path = None
         final_mesh_path = None
         if environment.model.seq:
-            try:
-                evaluated = evaluate_models(
-                    prediction=environment.model,
-                    target=target_model,
-                    enabled_metrics=self.metrics_config.get(
-                        "enabled",
-                        [
-                            "iou",
-                            "chamfer_distance",
-                            "accuracy",
-                            "f1",
-                            "watertight",
-                        ],
-                    ),
-                    chamfer_points=int(
-                        self.metrics_config.get("chamfer_points", 8192)
-                    ),
-                )
-                metrics.update(evaluated)
-            except Exception as exc:
-                metrics["evaluation_error"] = (
-                    f"{type(exc).__name__}: {exc}"
-                )
+            if target_model is not None:
+                try:
+                    evaluated = evaluate_models(
+                        prediction=environment.model,
+                        target=target_model,
+                        enabled_metrics=self.metrics_config.get(
+                            "enabled",
+                            [
+                                "iou",
+                                "chamfer_distance",
+                                "accuracy",
+                                "f1",
+                                "watertight",
+                            ],
+                        ),
+                        chamfer_points=int(
+                            self.metrics_config.get("chamfer_points", 8192)
+                        ),
+                    )
+                    metrics.update(evaluated)
+                except Exception as exc:
+                    metrics["evaluation_error"] = exception_summary(exc)
 
             final_cad_path, final_mesh_path, output_errors = (
                 self._save_final_data(trajectory_id_value, environment)
@@ -559,6 +599,8 @@ def _format_termination_counts(counts: Counter[str]) -> str:
 
 def _metrics_status(trajectory: TrajectoryRecord) -> str:
     metrics = trajectory.metrics
+    if "target_model_error" in metrics:
+        return "target_error"
     if "evaluation_error" in metrics:
         return "error"
     metric_errors = metrics.get("metric_errors")
@@ -577,6 +619,9 @@ def _trajectory_problem_summary(trajectory: TrajectoryRecord) -> str:
     evaluation_error = metrics.get("evaluation_error")
     if evaluation_error:
         problems.append(f"evaluation_error={evaluation_error}")
+    target_model_error = metrics.get("target_model_error")
+    if target_model_error:
+        problems.append(f"target_model_error={target_model_error}")
     metric_errors = metrics.get("metric_errors")
     if isinstance(metric_errors, dict) and metric_errors:
         problems.append(f"metric_errors={','.join(sorted(metric_errors))}")
@@ -766,6 +811,10 @@ def generate_rollouts(config: Dict[str, Any], force: bool = False) -> Path:
     )
     load_checkpoint(model, checkpoint_path)
     model.to(device)
+    gc.collect()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    logger.info("Rollout model weights loaded on {}", device)
     model.eval()
     processor = Text2CADProcessor.from_pretrained(
         pretrained_model_name_or_path=model_config["base_model"],
@@ -829,17 +878,32 @@ def generate_rollouts(config: Dict[str, Any], force: bool = False) -> Path:
                 episode_started_at = time.monotonic()
                 episode_stats: Counter[str] = Counter()
                 episode_terminations: Counter[str] = Counter()
-                target_model = load_target_model(
-                    Path(config["source_dataset_root"]),
-                    episode.target_cad_path,
-                )
+                target_model = None
+                target_model_error = None
+                try:
+                    target_model = load_target_model(
+                        Path(config["source_dataset_root"]),
+                        episode.target_cad_path,
+                    )
+                except AssertionError as exc:
+                    target_model_error = exception_summary(exc)
+                    logger.opt(exception=exc).error(
+                        "Cannot load target CAD for task {}; rollouts will "
+                        "continue without geometry metrics: {}",
+                        episode.task_id,
+                        target_model_error,
+                    )
                 logger.info(
                     "Task {}/{} {}: generating {} rollouts; target_operations={}",
                     episode_position,
                     len(episodes),
                     episode.task_id,
                     trajectories_per_episode,
-                    len(target_model.seq),
+                    (
+                        len(target_model.seq)
+                        if target_model is not None
+                        else "unavailable"
+                    ),
                 )
                 for rollout_index in range(trajectories_per_episode):
                     rollout_position = rollout_index + 1
@@ -887,13 +951,52 @@ def generate_rollouts(config: Dict[str, Any], force: bool = False) -> Path:
                         )
                     store.discard_uncommitted_data(identifier)
                     rollout_started_at = time.monotonic()
-                    trajectory, steps = generator.generate(
-                        episode=episode,
-                        rollout_index=rollout_index,
-                        seed=seed,
-                        trajectory_id_value=identifier,
-                        target_model=target_model,
-                    )
+                    try:
+                        trajectory, steps = generator.generate(
+                            episode=episode,
+                            rollout_index=rollout_index,
+                            seed=seed,
+                            trajectory_id_value=identifier,
+                            target_model=target_model,
+                            target_model_error=target_model_error,
+                        )
+                    except Exception as exc:
+                        # Individual rollouts are fault-isolation boundaries. A
+                        # malformed generated operation must not terminate the
+                        # complete dataset run even if it escapes a narrower
+                        # generation/execution/metric handler above.
+                        error = exception_summary(exc)
+                        logger.opt(exception=exc).error(
+                            "Unexpected failure in rollout {} for task {}: {}",
+                            identifier,
+                            episode.task_id,
+                            error,
+                        )
+                        store.discard_uncommitted_data(identifier)
+                        trajectory = TrajectoryRecord(
+                            trajectory_id=identifier,
+                            task_id=episode.task_id,
+                            rollout_index=rollout_index,
+                            seed=seed,
+                            termination_reason="rollout_error",
+                            num_generated_steps=0,
+                            valid=False,
+                            final_cad_path=None,
+                            final_mesh_path=None,
+                            execution_error=error,
+                            metrics_json=canonical_json(
+                                {
+                                    "termination_reason": "rollout_error",
+                                    "rollout_error": error,
+                                }
+                            ),
+                            generation_time_seconds=(
+                                time.monotonic() - rollout_started_at
+                            ),
+                            execution_time_seconds=0.0,
+                            metrics_version=str(config["metrics"]["version"]),
+                        )
+                        steps = []
                     pending_trajectories.append(trajectory)
                     pending_steps.extend(steps)
                     pending_ids.add(identifier)
