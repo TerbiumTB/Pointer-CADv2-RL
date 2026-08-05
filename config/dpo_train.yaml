@@ -6,9 +6,9 @@ model:
   dtype: "bfloat16"
 
 dataset:
-  episodes_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/episodes"
-  rollout_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/rollouts/sft-05b-k2-20260804"
-  preferences_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/preferences/geometry-v1"
+  episodes_root: "/home/terbium/datasets/paramcad-addon/small_15k/format/pointercad-rl/episodes"
+  rollout_root: "/home/terbium/datasets/paramcad-addon/small_15k/format/pointercad-rl/rollouts/sft-05b-k5"
+  preferences_root: "/home/terbium/datasets/paramcad-addon/small_15k/format/pointercad-rl/preferences/geometry-v1"
 
 
 # "model" keeps a frozen SFT copy in memory. "cached" reads total_logp from
@@ -42,9 +42,9 @@ reference:
 # smoke
 training:
   output_dir: "./log/dpo"
-  num_epochs: 1
+  num_epochs: 10
   batch_size: 1
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 16
   learning_rate: 1.0e-5
   tau_learning_rate: 1.0e-6
   weight_decay: 0.01
@@ -57,8 +57,8 @@ training:
   prefetch_factor: 2
   pin_memory: false
   seed: 0
-  log_interval: 1
-  checkpoint_interval: 1000
+  log_interval: 10
+  checkpoint_interval: 100
   validation_interval: 1
 
 # DPO scores the underlying model policy, not rollout sampling distributions.

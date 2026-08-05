@@ -1,8 +1,8 @@
 # The source dataset remains authoritative. Each selected model is kept whole:
 # all of its step-level records stay together in their original split.
 source:
-  dataset_dir: "/path/to/pointercad/dataset"
-  split_filepath: "/path/to/pointercad/train_val_test.json"
+  dataset_dir: "/mnt/afs_01e/mayi-folder/ParamCAD/dataset/paramcad-addon/dataset"
+  split_filepath: "/mnt/afs_01e/mayi-folder/ParamCAD/dataset/paramcad-addon/train_val_test.json"
   prompt_variants:
     - abs
     - exp
@@ -11,7 +11,7 @@ profiles:
   # Small, self-contained dataset for local loader / episode / rollout checks.
   smoke:
     mode: smoke
-    output_dir: "/path/to/subsets/pointercad-smoke"
+    output_dir: "/home/terbium/datasets/paramcad-addon/smoke"
     seed: 42
     materialization: copy
     max_sampling_attempts: 2000
@@ -35,7 +35,7 @@ profiles:
   # difference from the target, which the validator bounds with tolerance.
   train_small:
     mode: target_records
-    output_dir: "/path/to/subsets/pointercad-train-15k"
+    output_dir: "/home/terbium/datasets/paramcad-addon/small-15k"
     seed: 42
     # hardlink is space-efficient on one filesystem. Use copy for a portable
     # dataset, symlink for a lightweight view, or none to write only the split.

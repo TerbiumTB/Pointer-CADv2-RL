@@ -1,14 +1,14 @@
-run_id: "sft-05b-k2-20260804"
+run_id: "sft-05b-k5"
 generator_version: "rollout-generator-v1"
 
-# episodes_root: "/home/terbium/datasets/paramcad-addon/format/pointercad-rl/episodes"
-# source_dataset_root: "/mnt/afs_01e/mayi-folder/ParamCAD/dataset/paramcad-addon/dataset-addon"
-# output_root: "/home/terbium/datasets/paramcad-addon/format/pointercad-rl/rollouts"
+episodes_root: "/home/terbium/datasets/paramcad-addon/small-15k/format/pointercad-rl/episodes"
+source_dataset_root: "/mnt/afs_01e/mayi-folder/ParamCAD/dataset/paramcad-addon/dataset"
+output_root: "/home/terbium/datasets/paramcad-addon/small-15k/format/pointercad-rl/rollouts"
 
 # smoke
-episodes_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/episodes"
-source_dataset_root: "/home/terbium/datasets/paramcad-addon/smoke/dataset"
-output_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/rollouts"
+# episodes_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/episodes"
+# source_dataset_root: "/home/terbium/datasets/paramcad-addon/smoke/dataset"
+# output_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/rollouts"
 
 splits:
   - train

@@ -2,11 +2,11 @@
 # a full-episode index under format/pointercad_rl/episodes.
 source:
   name: "paramcad-addon"
-  dataset_dir: "/home/terbium/datasets/paramcad-addon/smoke/dataset"
-  split_filepath: "/home/terbium/datasets/paramcad-addon/smoke/train_val_test.json"
+  dataset_dir: "/home/terbium/datasets/paramcad-addon/small-15k/dataset"
+  split_filepath: "/home/terbium/datasets/paramcad-addon/small-15k/train_val_test.json"
   prompt_variants:
     - exp
 
-output_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl"
+output_root: "/home/terbium/datasets/paramcad-addon/small-15k/format/pointercad-rl"
 preprocessing_version: "episode-index-v1"
 
