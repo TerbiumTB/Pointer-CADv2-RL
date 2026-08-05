@@ -1,6 +1,6 @@
 # PointerCADv2-RL: контекст проекта
 
-Актуально на 2026-08-04. Этот файл фиксирует текущее состояние проекта,
+Актуально на 2026-08-05. Этот файл фиксирует текущее состояние проекта,
 архитектурные решения и ограничения для последующей работы.
 
 ## Границы изменений
@@ -269,22 +269,39 @@ preference view. Rollouts при этом не генерируются зано
 сохранён; rollout generator включает расширение через
 `return_log_probs=True`.
 
-Rollout generator сейчас является однопроцессным baseline: sampling и
-OpenCascade execution выполняются последовательно. Формат данных не зависит от
-этого решения, поэтому worker isolation можно добавить после smoke-test
-реального окружения.
+Rollout generator использует один независимый inference rank на каждую GPU через
+`torchrun`. Episode-задачи детерминированно распределяются между global ranks по
+`task_id`; все trajectories одной задачи принадлежат одному rank. Каждый rank
+запускает изолированные `spawn` CPU workers, которые владеют своими
+`CADEnvironment`, выполняют OpenCascade, geometry metrics и export. CPU workers
+передают B-Rep как NumPy payload, GPU coordinator собирает готовые состояния в
+batch и возвращает structured actions. Благодаря пулу workers CAD execution и
+metrics перекрываются со следующими GPU batches. Parquet shards имеют rank-safe
+имена `part-r<rank>-*.parquet`; loaders по-прежнему читают общий `part-*.parquet`
+dataset.
+
+Параметры throughput находятся в `generation.batch_size`,
+`generation.cpu_workers_per_gpu`, `generation.batch_wait_seconds` и
+`execution.cpu_threads_per_worker`. Они входят в persisted runtime config:
+изменение этих параметров требует нового `run_id` или `--force`. Generator v2 не
+поддерживает продолжение старых однопроцессных v1 runs и всегда использует
+CPU-worker pipeline, даже при одной GPU и batch size 1. Resume поддерживается
+только для прерванного v2 run с тем же runtime config. Для batched sampling
+используются отдельные seeded `torch.Generator` на trajectory; scheduling не
+меняет её random stream. При CUDA OOM coordinator восстанавливает RNG states и
+автоматически уменьшает effective batch вдвое. Rank 0 вычисляет checkpoint SHA
+один раз и рассылает runtime config остальным ranks.
 
 В hot path rollout generation не выполняются `gc.collect()` и
 `torch.cuda.empty_cache()` после каждой trajectory: allocator cache сохраняется
 между итерациями. Autoregressive `predict` при активном KV-cache удерживает
 только embedding последнего сгенерированного токена. Неизменный rendered prompt
-кэшируется для последовательных шагов/trajectories одной задачи. Prediction
-mesh лениво строится один раз на trajectory и переиспользуется для Chamfer,
-watertightness и STL export; target mesh переиспользуется между trajectories
-одной задачи. В `metrics_json.timings` сохраняется breakdown времени state graph,
+кэшируется для активного набора задач. Prediction mesh лениво строится один раз
+на trajectory и переиспользуется для Chamfer, watertightness и STL export. В
+`metrics_json.timings` сохраняется breakdown времени state graph,
 state save, input preparation, model generation, decode, execution, mesh build и
-exports, а `metrics_json.generation_counts` содержит числа plan tokens и CAD
-actions. Parquet schema при этом не меняется.
+exports, а `metrics_json.generation_counts` содержит числа plan tokens, CAD
+actions и фактический mean/min/max GPU batch. Parquet schema при этом не меняется.
 
 Ошибки построения сгенерированной операции, включая `AssertionError` из
 chamfer/fillet/OpenCascade-кода, являются результатом trajectory, а не ошибкой
@@ -324,7 +341,6 @@ checkpoint первый DPO loss до update должен быть близок 
 
 ## Что пока не реализовано
 
-- Изолированный CAD executor для rollout workers.
 - Precompute CLI для cached reference scores.
 - Online GRPO/PPO/CPPO trainer.
 - Финальная reward-функция и её тесты.
@@ -440,7 +456,8 @@ variant, заданный как `dataset.prompt_variant` в `config/test.yaml`.
 4. Построить preference view и проверить joint log-probability на одном
    известном episode.
 5. Запустить DPO smoke test, затем небольшой training run.
-6. Добавить CAD worker isolation и cached reference-score builder.
+6. Проверить throughput multi-GPU/CPU-worker rollout pipeline на сервере и
+   добавить cached reference-score builder.
 7. После стабилизации DPO реализовать online RL поверх того же episode/rollout
    формата.
 

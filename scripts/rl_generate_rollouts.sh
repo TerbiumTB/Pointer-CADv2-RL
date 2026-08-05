@@ -55,6 +55,29 @@ fi
 echo -e "${GREEN}[INFO] CUDA_VISIBLE_DEVICES = ${CUDA_VISIBLE_DEVICES:-scheduler managed}${NC}"
 echo -e "${GREEN}[INFO] torch CUDA devices   = ${CUDA_DEVICE_COUNT}${NC}"
 
+POINTERCAD_DIST_ENV_SCRIPT="${POINTERCAD_DIST_ENV_SCRIPT:-$HOME/dist_env.sh}"
+if [[ -f "$POINTERCAD_DIST_ENV_SCRIPT" ]]; then
+    # shellcheck disable=SC1090
+    source "$POINTERCAD_DIST_ENV_SCRIPT"
+    echo -e "${GREEN}[INFO] Distributed environment loaded from $POINTERCAD_DIST_ENV_SCRIPT${NC}"
+fi
+
+MASTER_ADDR="${MASTER_ADDR:-localhost}"
+MASTER_PORT="${MASTER_PORT:-32503}"
+NUM_MACHINES="${NUM_MACHINES:-${SENSECORE_PYTORCH_NNODES:-1}}"
+MACHINE_RANK="${MACHINE_RANK:-${NODE_RANK:-${SENSECORE_PYTORCH_NODE_RANK:-0}}}"
+GPUS_PER_NODE="${GPUS_PER_NODE:-${NUM_GPUS:-${SENSECORE_ACCELERATE_DEVICE_COUNT:-$CUDA_DEVICE_COUNT}}}"
+if [[ "$GPUS_PER_NODE" -le 0 || "$GPUS_PER_NODE" -gt "$CUDA_DEVICE_COUNT" ]]; then
+    echo -e "${RED}[ERROR] GPUS_PER_NODE=$GPUS_PER_NODE, but PyTorch sees $CUDA_DEVICE_COUNT CUDA devices.${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}[INFO] NUM_MACHINES        = ${NUM_MACHINES}${NC}"
+echo -e "${GREEN}[INFO] MACHINE_RANK        = ${MACHINE_RANK}${NC}"
+echo -e "${GREEN}[INFO] GPUS_PER_NODE       = ${GPUS_PER_NODE}${NC}"
+echo -e "${GREEN}[INFO] MASTER_ADDR         = ${MASTER_ADDR}${NC}"
+echo -e "${GREEN}[INFO] MASTER_PORT         = ${MASTER_PORT}${NC}"
+
 POINTERCAD_PROXY_ENV_SCRIPT="${POINTERCAD_PROXY_ENV_SCRIPT:-$HOME/proxy.sh}"
 if [[ -f "$POINTERCAD_PROXY_ENV_SCRIPT" ]]; then
     # shellcheck disable=SC1090
@@ -65,7 +88,7 @@ else
 fi
 
 mkdir -p "$LOG_DIR"
-LOG_PATH="$LOG_DIR/generate_rollouts_$(date +"%Y%m%d_%H%M%S").log"
+LOG_PATH="$LOG_DIR/generate_rollouts_node_${MACHINE_RANK}_$(date +"%Y%m%d_%H%M%S").log"
 
 echo "[INFO] Conda environment: $POINTERCAD_CONDA_ENV"
 echo "[INFO] Python executable: $(python -c 'import sys; print(sys.executable)')"
@@ -73,7 +96,13 @@ echo "[INFO] HF_HOME: ${HF_HOME:-framework default}"
 echo "[INFO] Config: $CONFIG_PATH"
 echo "[INFO] Log: $LOG_PATH"
 
-python -u -m preprocessing.generate_rl_rollouts \
+torchrun \
+    --nnodes "$NUM_MACHINES" \
+    --nproc-per-node "$GPUS_PER_NODE" \
+    --node-rank "$MACHINE_RANK" \
+    --master-addr "$MASTER_ADDR" \
+    --master-port "$MASTER_PORT" \
+    -m preprocessing.generate_rl_rollouts \
     -c "$CONFIG_PATH" \
     "$@" \
     2>&1 | tee "$LOG_PATH"

@@ -1,3 +1,4 @@
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
@@ -7,8 +8,13 @@ from rl.storage import next_part_path, read_yaml, write_parquet, write_yaml
 
 
 class RolloutStore:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, writer_id: Optional[str] = None):
         self.root = Path(root)
+        if writer_id is not None and not re.fullmatch(
+            r"[A-Za-z0-9_]+", writer_id
+        ):
+            raise ValueError(f"Unsafe rollout writer_id: {writer_id!r}")
+        self.writer_id = writer_id
         self.trajectories_dir = self.root / "trajectories"
         self.steps_dir = self.root / "steps"
         self.scores_dir = self.root / "scores"
@@ -40,9 +46,13 @@ class RolloutStore:
 
     @classmethod
     def create(
-        cls, root: Path, config: Dict[str, Any], exist_ok: bool = False
+        cls,
+        root: Path,
+        config: Dict[str, Any],
+        exist_ok: bool = False,
+        writer_id: Optional[str] = None,
     ) -> "RolloutStore":
-        store = cls(root)
+        store = cls(root, writer_id=writer_id)
         if store.root.exists() and any(store.root.iterdir()) and not exist_ok:
             raise FileExistsError(f"Rollout store is not empty: {store.root}")
         for directory in (
@@ -67,6 +77,21 @@ class RolloutStore:
             write_yaml(config_path, config)
         return store
 
+    def _next_part_path(self, directory: Path) -> Path:
+        if self.writer_id is None:
+            return next_part_path(directory)
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        prefix = f"part-{self.writer_id}-"
+        existing = sorted(directory.glob(f"{prefix}*.parquet"))
+        if not existing:
+            index = 0
+        else:
+            index = max(
+                int(path.stem.removeprefix(prefix)) for path in existing
+            ) + 1
+        return directory / f"{prefix}{index:06d}.parquet"
+
     def append(
         self,
         trajectories: Sequence[TrajectoryRecord],
@@ -78,11 +103,11 @@ class RolloutStore:
                 raise ValueError("Cannot append steps without trajectories.")
             if scores:
                 write_parquet(
-                    next_part_path(self.scores_dir), scores, ScoreRecord
+                    self._next_part_path(self.scores_dir), scores, ScoreRecord
                 )
             return
 
-        trajectory_path = next_part_path(self.trajectories_dir)
+        trajectory_path = self._next_part_path(self.trajectories_dir)
         shard_name = trajectory_path.name
         if steps:
             write_parquet(

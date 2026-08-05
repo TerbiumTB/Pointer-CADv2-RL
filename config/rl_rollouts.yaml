@@ -1,5 +1,5 @@
 run_id: "sft-05b-k5"
-generator_version: "rollout-generator-v1"
+generator_version: "rollout-generator-v2-parallel"
 
 episodes_root: "/home/terbium/datasets/paramcad-addon/small-15k/format/pointercad-rl/episodes"
 source_dataset_root: "/mnt/afs_01e/mayi-folder/ParamCAD/dataset/paramcad-addon/dataset"
@@ -23,6 +23,12 @@ model:
 generation:
   trajectories_per_episode: 2
   base_seed: 0
+  # GPU actions are generated together across independent active trajectories.
+  # Keep more CPU workers than batch slots so CAD execution/metrics can overlap
+  # the next GPU batch.
+  batch_size: 8
+  cpu_workers_per_gpu: 12
+  batch_wait_seconds: 0.03
   max_episode_steps: 64
   max_generation_steps: 1024
   max_input_length: 3072
@@ -37,6 +43,8 @@ generation:
 
 execution:
   strict: true
+  # Prevent OpenCascade workers from oversubscribing CPU cores internally.
+  cpu_threads_per_worker: 1
   build_timeout_seconds: 300.0
   surf_u_samples: 32
   surf_v_samples: 32

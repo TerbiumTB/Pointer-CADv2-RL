@@ -256,6 +256,7 @@ class PointerCAD(nn.Module):
         max_steps: int = MAX_GENERATION_LENGTH,
         mode="argmax", # can be "argmax" or "sample"
         return_log_probs=False,
+        sampling_generators=None,
         **kwargs
     ):
         assert mode in ["argmax", "sample"], f"Invalid mode: {mode}. Must be 'argmax' or 'sample'."
@@ -263,6 +264,12 @@ class PointerCAD(nn.Module):
         self.eval()
 
         batch_size, seq_length = input_ids.shape
+        if sampling_generators is None:
+            sampling_generators = [None] * batch_size
+        if len(sampling_generators) != batch_size:
+            raise ValueError(
+                "sampling_generators must contain one generator per batch item."
+            )
         finish_mark = [False] * batch_size
         generated_ids = input_ids.clone()
         generated_mask = attention_mask.clone()
@@ -348,7 +355,11 @@ class PointerCAD(nn.Module):
                         logits = logits - torch.max(logits)
                         logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
                         label_probabilities = F.softmax(logits, dim=0)
-                        pred_label = torch.multinomial(label_probabilities, num_samples=1).squeeze(0)
+                        pred_label = torch.multinomial(
+                            label_probabilities,
+                            num_samples=1,
+                            generator=sampling_generators[idx],
+                        ).squeeze(0)
                     else:
                         logits = label_logits / temperature_label
                         pred_label = torch.argmax(label_logits, dim=0)
@@ -379,7 +390,11 @@ class PointerCAD(nn.Module):
                                     logits = sim_length / temperature_parameter
                                     logits = logits - torch.max(logits)
                                     logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
-                                    pred_parameter = torch.multinomial(F.softmax(logits, dim=0), num_samples=1).squeeze(0) + 1  # +1 for 1-based index
+                                    pred_parameter = torch.multinomial(
+                                        F.softmax(logits, dim=0),
+                                        num_samples=1,
+                                        generator=sampling_generators[idx],
+                                    ).squeeze(0) + 1  # +1 for 1-based index
                                 selected_parameter_logp = F.log_softmax(
                                     sim_length / temperature_parameter, dim=0
                                 )[pred_parameter - 1]
@@ -398,7 +413,11 @@ class PointerCAD(nn.Module):
                                     logits = sim_angle / temperature_parameter
                                     logits = logits - torch.max(logits)
                                     logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
-                                    pred_parameter = torch.multinomial(F.softmax(logits, dim=0), num_samples=1).squeeze(0) + 1  # +1 for 1-based index
+                                    pred_parameter = torch.multinomial(
+                                        F.softmax(logits, dim=0),
+                                        num_samples=1,
+                                        generator=sampling_generators[idx],
+                                    ).squeeze(0) + 1  # +1 for 1-based index
                                 selected_parameter_logp = F.log_softmax(
                                     sim_angle / temperature_parameter, dim=0
                                 )[pred_parameter - 1]
@@ -417,7 +436,11 @@ class PointerCAD(nn.Module):
                                 logits = cos_sim / temperature_pointer
                                 logits = logits - torch.max(logits)
                                 logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
-                                index = torch.multinomial(F.softmax(logits, dim=0), num_samples=1).squeeze(0)
+                                index = torch.multinomial(
+                                    F.softmax(logits, dim=0),
+                                    num_samples=1,
+                                    generator=sampling_generators[idx],
+                                ).squeeze(0)
                             selected_pointer_logp = F.log_softmax(
                                 cos_sim / temperature_pointer, dim=0
                             )[index]
@@ -432,7 +455,11 @@ class PointerCAD(nn.Module):
                                     logits = cos_sim / temperature_pointer
                                     logits = logits - torch.max(logits)
                                     logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
-                                    pred_pointer = torch.multinomial(F.softmax(logits, dim=0), num_samples=1).squeeze(0)
+                                    pred_pointer = torch.multinomial(
+                                        F.softmax(logits, dim=0),
+                                        num_samples=1,
+                                        generator=sampling_generators[idx],
+                                    ).squeeze(0)
                                 selected_pointer_logp = F.log_softmax(
                                     cos_sim / temperature_pointer, dim=0
                                 )[pred_pointer]
@@ -475,7 +502,11 @@ class PointerCAD(nn.Module):
                         logits = pred_logit / temperature_lm
                         logits = logits - torch.max(logits)
                         logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
-                        pred_id = torch.multinomial(F.softmax(logits, dim=0), num_samples=1).squeeze(0)
+                        pred_id = torch.multinomial(
+                            F.softmax(logits, dim=0),
+                            num_samples=1,
+                            generator=sampling_generators[idx],
+                        ).squeeze(0)
 
                     if pred_id >= len(tokenizer): pred_id = 151643  # unknown token handling
                     if pred_id == 151673: pred_id = 151643  # unsupport token (<|cad_pad|>) handling

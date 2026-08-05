@@ -27,6 +27,24 @@ def parse_args() -> argparse.Namespace:
             "are skipped and only missing trajectories are generated."
         ),
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Override generation.batch_size for this run.",
+    )
+    parser.add_argument(
+        "--cpu-workers-per-gpu",
+        type=int,
+        default=None,
+        help="Override generation.cpu_workers_per_gpu for this run.",
+    )
+    parser.add_argument(
+        "--batch-wait-seconds",
+        type=float,
+        default=None,
+        help="Override generation.batch_wait_seconds for this run.",
+    )
     return parser.parse_args()
 
 
@@ -36,6 +54,15 @@ def main() -> None:
         config = yaml.safe_load(file)
     if not isinstance(config, dict):
         raise ValueError(f"Expected a YAML object in {args.config}.")
+    generation = config.setdefault("generation", {})
+    overrides = {
+        "batch_size": args.batch_size,
+        "cpu_workers_per_gpu": args.cpu_workers_per_gpu,
+        "batch_wait_seconds": args.batch_wait_seconds,
+    }
+    for name, value in overrides.items():
+        if value is not None:
+            generation[name] = value
     output = generate_rollouts(config, force=args.force)
     logger.info("Rollout generation completed: {}", output)
 
