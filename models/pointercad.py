@@ -531,9 +531,23 @@ class PointerCAD(nn.Module):
                 if (generated_ids[idx, -1] == 151673) and (generated_label[idx][-1] != TOKEN.index("<|model_end|>")) and (generated_label[idx][-1] != TOKEN.index("<|part_end|>")):
                     next_token_class[idx] = True
             inputs_embeds_next = inputs_embeds_next + self.cad_position_embedding(next_token_class.type_as(input_ids))
-            inputs_embeds = torch.cat([inputs_embeds, inputs_embeds_next.unsqueeze(1)], dim=1)
+            if past_key_values is None:
+                # Preserve the full fallback path for model configurations that
+                # decline to return a cache even when use_cache=True.
+                inputs_embeds = torch.cat(
+                    [inputs_embeds, inputs_embeds_next.unsqueeze(1)], dim=1
+                )
+            else:
+                # With a populated KV cache only the newest embedding is consumed
+                # by the next decoder iteration. Retaining and copying the full
+                # history here makes decoding unnecessarily quadratic.
+                inputs_embeds = inputs_embeds_next.unsqueeze(1)
 
-            generated_mask_pad = torch.ones((batch_size, generated_ids.shape[1] - generated_mask.shape[1]), device=generated_mask.device, dtype=generated_mask.dtype)
+            generated_mask_pad = torch.ones(
+                (batch_size, 1),
+                device=generated_mask.device,
+                dtype=generated_mask.dtype,
+            )
             generated_mask = torch.cat([generated_mask, generated_mask_pad], dim=-1)
 
         result = (

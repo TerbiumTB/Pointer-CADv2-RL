@@ -2,7 +2,7 @@ import copy
 import json
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 import dgl
 import numpy as np
@@ -13,7 +13,10 @@ from occwl.uvgrid import ugrid, uvgrid
 
 from cadmodel.model import CADModel, convert_json_from_deepcad
 from measurements.accuracy import accuracy
-from measurements.chamfer_distance import chamfer_distance
+from measurements.chamfer_distance import (
+    chamfer_distance,
+    chamfer_distance_from_meshes,
+)
 from measurements.f1_score import f1_score
 from measurements.intersection_over_union import intersection_over_union
 from measurements.watertightness import is_watertight
@@ -233,6 +236,8 @@ def evaluate_models(
     target: CADModel,
     enabled_metrics: Iterable[str],
     chamfer_points: int,
+    prediction_mesh_factory: Optional[Callable[[], Any]] = None,
+    target_mesh_factory: Optional[Callable[[], Any]] = None,
 ) -> Dict[str, Any]:
     enabled = set(enabled_metrics)
     supported = {"iou", "chamfer_distance", "accuracy", "f1", "watertight"}
@@ -267,11 +272,23 @@ def evaluate_models(
 
     if "chamfer_distance" in enabled:
         try:
-            metrics["chamfer_distance"] = float(
-                chamfer_distance(
-                    prediction, target, points=chamfer_points
+            if (
+                prediction_mesh_factory is not None
+                and target_mesh_factory is not None
+            ):
+                metrics["chamfer_distance"] = float(
+                    chamfer_distance_from_meshes(
+                        prediction_mesh_factory(),
+                        target_mesh_factory(),
+                        points=chamfer_points,
+                    )
                 )
-            )
+            else:
+                metrics["chamfer_distance"] = float(
+                    chamfer_distance(
+                        prediction, target, points=chamfer_points
+                    )
+                )
         except Exception as exc:
             metrics["chamfer_distance"] = None
             errors["chamfer_distance"] = f"{type(exc).__name__}: {exc}"
@@ -300,7 +317,12 @@ def evaluate_models(
 
     if "watertight" in enabled:
         try:
-            metrics["watertight"] = bool(is_watertight(prediction))
+            if prediction_mesh_factory is not None:
+                metrics["watertight"] = bool(
+                    prediction_mesh_factory().is_watertight
+                )
+            else:
+                metrics["watertight"] = bool(is_watertight(prediction))
         except Exception as exc:
             metrics["watertight"] = None
             errors["watertight"] = f"{type(exc).__name__}: {exc}"

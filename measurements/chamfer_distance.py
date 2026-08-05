@@ -29,8 +29,13 @@ def __normalize(points_gt, points_pred, centered=True):
     return points_gt, points_pred
 
 
-def chamfer_distance(pred: CADModel, gt: CADModel, points=1024, type="uniform", normalize=True):
-    pred_mesh, gt_mesh = create_mesh(pred), create_mesh(gt)
+def chamfer_distance_from_meshes(
+    pred_mesh,
+    gt_mesh,
+    points=1024,
+    type="uniform",
+    normalize=True,
+):
     pred_points, gt_points = None, None
 
     if type == "uniform":
@@ -60,6 +65,20 @@ def chamfer_distance(pred: CADModel, gt: CADModel, points=1024, type="uniform", 
     return gt_to_pred_chamfer + pred_to_gt_chamfer
 
 
+def chamfer_distance(
+    pred: CADModel,
+    gt: CADModel,
+    points=1024,
+    type="uniform",
+    normalize=True,
+):
+    return chamfer_distance_from_meshes(
+        create_mesh(pred),
+        create_mesh(gt),
+        points=points,
+        type=type,
+        normalize=normalize,
+    )
 
 if __name__ == "__main__":
     from loguru import logger

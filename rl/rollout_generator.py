@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import (
     Any,
+    Callable,
     Dict,
     Iterator,
     List,
@@ -171,6 +172,32 @@ def parameter_map_to_lists(parameter_map: Dict[str, Any]) -> Dict[str, List[floa
     return result
 
 
+class _LazyMesh:
+    """Build a mesh at most once and retain either its value or its failure."""
+
+    _UNSET = object()
+
+    def __init__(self, builder: Callable[[], Any]):
+        self._builder = builder
+        self._value = self._UNSET
+        self._error: Optional[Exception] = None
+        self.build_time_seconds = 0.0
+
+    def get(self):
+        if self._error is not None:
+            raise self._error
+        if self._value is self._UNSET:
+            started_at = time.monotonic()
+            try:
+                self._value = self._builder()
+            except Exception as exc:
+                self._error = exc
+                raise
+            finally:
+                self.build_time_seconds += time.monotonic() - started_at
+        return self._value
+
+
 def exception_summary(exc: Exception) -> str:
     """Return a useful one-line error even for message-less assertions."""
     message = str(exc).strip()
@@ -271,6 +298,10 @@ class RolloutGenerator:
         self.execution = config["execution"]
         self.metrics_config = config["metrics"]
         self.outputs = config["outputs"]
+        self._cached_prompt: Optional[str] = None
+        self._cached_prompt_text: Optional[str] = None
+        self._target_mesh_task_id: Optional[str] = None
+        self._target_mesh: Optional[_LazyMesh] = None
 
     def _environment(self) -> CADEnvironment:
         return CADEnvironment(
@@ -283,18 +314,48 @@ class RolloutGenerator:
             ),
         )
 
+    def _render_prompt(self, prompt: str) -> str:
+        if prompt != self._cached_prompt:
+            messages = [prompt_message(prompt)]
+            self._cached_prompt_text = self.processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            self._cached_prompt = prompt
+        if self._cached_prompt_text is None:
+            raise RuntimeError("Prompt rendering cache was not initialized.")
+        return self._cached_prompt_text
+
+    def _target_mesh_for_task(
+        self, task_id: str, target_model
+    ) -> Optional[_LazyMesh]:
+        if task_id != self._target_mesh_task_id:
+            self._target_mesh_task_id = task_id
+            self._target_mesh = (
+                _LazyMesh(lambda: create_mesh(target_model))
+                if target_model is not None
+                else None
+            )
+        return self._target_mesh
+
     def _generate_action(self, prompt: str, graph: dgl.DGLGraph):
-        messages = [prompt_message(prompt)]
-        text = self.processor.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
+        timings: Dict[str, float] = {}
+        started_at = time.monotonic()
+        text = self._render_prompt(prompt)
+        timings["prompt_render_time_seconds"] = (
+            time.monotonic() - started_at
         )
+
+        started_at = time.monotonic()
         inputs = self.processor(
             text=text,
             breps=dgl.batch([graph]),
             max_length=int(self.generation.get("max_input_length", 3072)),
         ).to(self.device)
+        timings["input_preparation_time_seconds"] = (
+            time.monotonic() - started_at
+        )
         temperatures = self.generation["temperatures"]
         started_at = time.monotonic()
         outputs = self.model.predict(
@@ -312,7 +373,9 @@ class RolloutGenerator:
             return_log_probs=True,
             **inputs,
         )
-        generation_seconds = time.monotonic() - started_at
+        timings["model_generation_time_seconds"] = (
+            time.monotonic() - started_at
+        )
         (
             generated_ids,
             parameter_maps,
@@ -321,6 +384,7 @@ class RolloutGenerator:
             pointers,
             behavior_log_probs,
         ) = outputs
+        started_at = time.monotonic()
         decoded = decode_step_generation(
             tokenizer=self.processor.tokenizer,
             generated_ids=generated_ids[0],
@@ -330,21 +394,37 @@ class RolloutGenerator:
             pointers=pointers[0],
             behavior_log_probs=behavior_log_probs[0],
         )
-        return decoded, generation_seconds
+        timings["generation_decode_time_seconds"] = (
+            time.monotonic() - started_at
+        )
+        return decoded, timings
 
     def _save_final_data(
-        self, trajectory_id_value: str, environment: CADEnvironment
-    ) -> Tuple[Optional[str], Optional[str], Dict[str, str]]:
+        self,
+        trajectory_id_value: str,
+        environment: CADEnvironment,
+        prediction_mesh_factory: Optional[Callable[[], Any]] = None,
+    ) -> Tuple[
+        Optional[str],
+        Optional[str],
+        Dict[str, str],
+        Dict[str, float],
+    ]:
         errors: Dict[str, str] = {}
+        timings: Dict[str, float] = {
+            "step_export_time_seconds": 0.0,
+            "mesh_export_time_seconds": 0.0,
+        }
         cad_path = None
         mesh_path = None
         if not environment.model.seq:
-            return cad_path, mesh_path, errors
+            return cad_path, mesh_path, errors, timings
 
         if bool(self.outputs.get("save_step", True)):
             destination = self.store.new_data_path(
                 "cad", f"{trajectory_id_value}.step"
             )
+            started_at = time.monotonic()
             try:
                 with suppress_native_stdout(
                     bool(
@@ -370,14 +450,28 @@ class RolloutGenerator:
                 errors["step"] = f"{type(exc).__name__}: {exc}"
                 if destination.exists():
                     destination.unlink()
+            finally:
+                timings["step_export_time_seconds"] += (
+                    time.monotonic() - started_at
+                )
 
         if bool(self.outputs.get("save_mesh", True)):
             destination = self.store.new_data_path(
                 "mesh", f"{trajectory_id_value}.stl"
             )
             try:
-                mesh = create_mesh(environment.model)
-                mesh.export(str(destination))
+                mesh = (
+                    prediction_mesh_factory()
+                    if prediction_mesh_factory is not None
+                    else create_mesh(environment.model)
+                )
+                started_at = time.monotonic()
+                try:
+                    mesh.export(str(destination))
+                finally:
+                    timings["mesh_export_time_seconds"] += (
+                        time.monotonic() - started_at
+                    )
                 if not destination.is_file():
                     raise RuntimeError("Mesh exporter did not create an output file.")
                 mesh_path = self.store.relative_path(destination)
@@ -385,7 +479,7 @@ class RolloutGenerator:
                 errors["mesh"] = f"{type(exc).__name__}: {exc}"
                 if destination.exists():
                     destination.unlink()
-        return cad_path, mesh_path, errors
+        return cad_path, mesh_path, errors, timings
 
     def generate(
         self,
@@ -396,11 +490,26 @@ class RolloutGenerator:
         target_model=None,
         target_model_error: Optional[str] = None,
     ) -> Tuple[TrajectoryRecord, List[StepRecord]]:
+        rollout_started_at = time.monotonic()
         set_sampling_seed(seed, self.device)
         environment = self._environment()
+        target_mesh = self._target_mesh_for_task(
+            episode.task_id, target_model
+        )
+        target_mesh_time_before = (
+            target_mesh.build_time_seconds if target_mesh is not None else 0.0
+        )
         steps: List[StepRecord] = []
         generation_seconds = 0.0
         execution_seconds = 0.0
+        detailed_timings: Dict[str, float] = {
+            "state_graph_time_seconds": 0.0,
+            "state_save_time_seconds": 0.0,
+            "prompt_render_time_seconds": 0.0,
+            "input_preparation_time_seconds": 0.0,
+            "model_generation_time_seconds": 0.0,
+            "generation_decode_time_seconds": 0.0,
+        }
         termination_reason = "max_episode_steps"
         trajectory_error = None
         step_errors: List[str] = []
@@ -413,13 +522,25 @@ class RolloutGenerator:
                 f"{trajectory_id_value}:state:{step_index:04d}"
             )
             try:
-                graph = environment.state_graph()
+                started_at = time.monotonic()
+                try:
+                    graph = environment.state_graph()
+                finally:
+                    detailed_timings["state_graph_time_seconds"] += (
+                        time.monotonic() - started_at
+                    )
                 state_path = self.store.new_data_path(
                     "states",
                     f"{trajectory_id_value}/step-{step_index:04d}.bin",
                 )
-                save_brep_graph(graph, state_path)
-                state_relative_path = self.store.relative_path(state_path)
+                started_at = time.monotonic()
+                try:
+                    save_brep_graph(graph, state_path)
+                    state_relative_path = self.store.relative_path(state_path)
+                finally:
+                    detailed_timings["state_save_time_seconds"] += (
+                        time.monotonic() - started_at
+                    )
             except Exception as exc:
                 termination_reason = "state_graph_error"
                 trajectory_error = exception_summary(exc)
@@ -427,9 +548,11 @@ class RolloutGenerator:
 
             generation_started_at = time.monotonic()
             try:
-                decoded, _ = self._generate_action(
+                decoded, action_timings = self._generate_action(
                     episode.prompt, graph
                 )
+                for name, value in action_timings.items():
+                    detailed_timings[name] += value
                 (
                     plan_text,
                     plan_token_ids,
@@ -511,7 +634,15 @@ class RolloutGenerator:
             metrics["target_model_error"] = target_model_error
         final_cad_path = None
         final_mesh_path = None
+        prediction_mesh: Optional[_LazyMesh] = None
+        output_timings: Dict[str, float] = {
+            "step_export_time_seconds": 0.0,
+            "mesh_export_time_seconds": 0.0,
+        }
         if environment.model.seq:
+            prediction_mesh = _LazyMesh(
+                lambda: create_mesh(environment.model)
+            )
             if target_model is not None:
                 try:
                     evaluated = evaluate_models(
@@ -530,15 +661,50 @@ class RolloutGenerator:
                         chamfer_points=int(
                             self.metrics_config.get("chamfer_points", 8192)
                         ),
+                        prediction_mesh_factory=prediction_mesh.get,
+                        target_mesh_factory=(
+                            target_mesh.get
+                            if target_mesh is not None
+                            else None
+                        ),
                     )
                     metrics.update(evaluated)
                 except Exception as exc:
                     metrics["evaluation_error"] = exception_summary(exc)
 
-            final_cad_path, final_mesh_path, output_errors = (
-                self._save_final_data(trajectory_id_value, environment)
+            (
+                final_cad_path,
+                final_mesh_path,
+                output_errors,
+                output_timings,
+            ) = self._save_final_data(
+                trajectory_id_value,
+                environment,
+                prediction_mesh_factory=prediction_mesh.get,
             )
             metrics["output_errors"] = output_errors
+
+        detailed_timings.update(output_timings)
+        detailed_timings["generation_time_seconds"] = generation_seconds
+        detailed_timings["execution_time_seconds"] = execution_seconds
+        detailed_timings["prediction_mesh_build_time_seconds"] = (
+            prediction_mesh.build_time_seconds
+            if prediction_mesh is not None
+            else 0.0
+        )
+        detailed_timings["target_mesh_build_time_seconds"] = (
+            target_mesh.build_time_seconds - target_mesh_time_before
+            if target_mesh is not None
+            else 0.0
+        )
+        detailed_timings["rollout_time_seconds"] = (
+            time.monotonic() - rollout_started_at
+        )
+        metrics["timings"] = detailed_timings
+        metrics["generation_counts"] = {
+            "plan_tokens": sum(len(step.plan_token_ids) for step in steps),
+            "cad_actions": sum(len(step.labels) for step in steps),
+        }
 
         record = TrajectoryRecord(
             trajectory_id=trajectory_id_value,
@@ -639,9 +805,15 @@ def _log_rollout_result(
     elapsed_seconds: float,
 ) -> None:
     log = logger.info if trajectory.valid else logger.warning
+    metrics = trajectory.metrics
+    timings = metrics.get("timings", {})
+    counts = metrics.get("generation_counts", {})
     log(
         "Rollout {}/{} for task {} ({}): valid={} termination={} steps={} "
-        "step_export={} mesh_export={} metrics={} elapsed={:.1f}s{}",
+        "plan_tokens={} cad_actions={} step_export={} mesh_export={} "
+        "metrics={} time[generation={:.2f}s execution={:.2f}s "
+        "state={:.2f}s metrics={:.2f}s mesh_build_subset={:.2f}s "
+        "export={:.2f}s total={:.2f}s]{}",
         rollout_position,
         trajectories_per_episode,
         trajectory.task_id,
@@ -649,9 +821,20 @@ def _log_rollout_result(
         trajectory.valid,
         trajectory.termination_reason,
         trajectory.num_generated_steps,
+        counts.get("plan_tokens", "unknown"),
+        counts.get("cad_actions", "unknown"),
         "saved" if trajectory.final_cad_path is not None else "missing",
         "saved" if trajectory.final_mesh_path is not None else "missing",
         _metrics_status(trajectory),
+        float(timings.get("generation_time_seconds", 0.0)),
+        float(timings.get("execution_time_seconds", 0.0)),
+        float(timings.get("state_graph_time_seconds", 0.0))
+        + float(timings.get("state_save_time_seconds", 0.0)),
+        float(metrics.get("metrics_time_seconds", 0.0)),
+        float(timings.get("prediction_mesh_build_time_seconds", 0.0))
+        + float(timings.get("target_mesh_build_time_seconds", 0.0)),
+        float(timings.get("step_export_time_seconds", 0.0))
+        + float(timings.get("mesh_export_time_seconds", 0.0)),
         elapsed_seconds,
         _trajectory_problem_summary(trajectory),
     )
@@ -1033,9 +1216,6 @@ def generate_rollouts(config: Dict[str, Any], force: bool = False) -> Path:
                             f"{split_stats['rollouts']}"
                         ),
                     )
-                    gc.collect()
-                    if device.type == "cuda":
-                        torch.cuda.empty_cache()
                 logger.info(
                     "Task {}/{} {} complete: valid(model_end)={}/{} "
                     "step_export={}/{} mesh_export={}/{} generated={} "

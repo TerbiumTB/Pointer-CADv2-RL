@@ -274,6 +274,18 @@ OpenCascade execution выполняются последовательно. Ф�
 этого решения, поэтому worker isolation можно добавить после smoke-test
 реального окружения.
 
+В hot path rollout generation не выполняются `gc.collect()` и
+`torch.cuda.empty_cache()` после каждой trajectory: allocator cache сохраняется
+между итерациями. Autoregressive `predict` при активном KV-cache удерживает
+только embedding последнего сгенерированного токена. Неизменный rendered prompt
+кэшируется для последовательных шагов/trajectories одной задачи. Prediction
+mesh лениво строится один раз на trajectory и переиспользуется для Chamfer,
+watertightness и STL export; target mesh переиспользуется между trajectories
+одной задачи. В `metrics_json.timings` сохраняется breakdown времени state graph,
+state save, input preparation, model generation, decode, execution, mesh build и
+exports, а `metrics_json.generation_counts` содержит числа plan tokens и CAD
+actions. Parquet schema при этом не меняется.
+
 Ошибки построения сгенерированной операции, включая `AssertionError` из
 chamfer/fillet/OpenCascade-кода, являются результатом trajectory, а не ошибкой
 всего rollout run: невалидная операция откатывается, step и trajectory
