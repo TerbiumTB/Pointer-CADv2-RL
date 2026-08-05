@@ -283,21 +283,45 @@ dataset.
 Параметры throughput находятся в `generation.batch_size`,
 `generation.cpu_workers_per_gpu`, `generation.batch_wait_seconds` и
 `execution.cpu_threads_per_worker`. Они входят в persisted runtime config:
-изменение этих параметров требует нового `run_id` или `--force`. Generator v2 не
-поддерживает продолжение старых однопроцессных v1 runs и всегда использует
+изменение этих параметров требует нового `run_id` или `--force`. Generator v4 не
+поддерживает продолжение старых v1/v2/v3 runs и всегда использует
 CPU-worker pipeline, даже при одной GPU и batch size 1. Resume поддерживается
-только для прерванного v2 run с тем же runtime config. Для batched sampling
+только для прерванного v4 run с тем же runtime config. Для batched sampling
 используются отдельные seeded `torch.Generator` на trajectory; scheduling не
 меняет её random stream. При CUDA OOM coordinator восстанавливает RNG states и
 автоматически уменьшает effective batch вдвое. Rank 0 вычисляет checkpoint SHA
 один раз и рассылает runtime config остальным ranks.
 
+Rendered chat prompt для одного episode является строкой: `prompt_message`
+передаётся в `apply_chat_template` без дополнительного list wrapper. Старый v2
+wrapper возвращал list строк и приводил к массовому `generation_error` в
+`Text2CADProcessor`. Coordinator прекращает run после восьми последовательных
+одинаковых generation errors, чтобы системная ошибка больше не записывалась как
+успешно обработанный полный датасет.
+
+При batched autoregressive generation завершившиеся раньше элементы получают
+правый EOS/pad suffix, пока остальные элементы batch продолжают decoding. Эти
+служебные токены не имеют behavior log-probabilities и отрезаются в
+`decode_step_generation`; любой непаддинговый suffix по-прежнему считается
+ошибкой рассинхронизации.
+
+Отсутствие CAD action у отдельного stochastic sample является per-trajectory
+generation failure, а не ошибкой всего batch. Успешно сгенерированные соседние
+элементы сразу передаются CPU workers; GPU batch не пересчитывается и adaptive
+batch size не уменьшается. Другие decode/model exceptions остаются системными и
+проходят через retry/fail-fast границу.
+
 В hot path rollout generation не выполняются `gc.collect()` и
 `torch.cuda.empty_cache()` после каждой trajectory: allocator cache сохраняется
 между итерациями. Autoregressive `predict` при активном KV-cache удерживает
-только embedding последнего сгенерированного токена. Неизменный rendered prompt
-кэшируется для активного набора задач. Prediction mesh лениво строится один раз
-на trajectory и переиспользуется для Chamfer, watertightness и STL export. В
+только embedding последнего сгенерированного токена. В v4 LM head, vocabulary
+masking/log-softmax и label/parameter/pointer heads вычисляются один раз для всех
+активных элементов соответствующего типа, а не отдельно для каждой trajectory.
+Индивидуальные sampling generators сохраняются; выбранные behavior logps
+остаются GPU scalars и переносятся в Python lists одним batched преобразованием
+в конце `predict`. Active KV-cache compaction пока не реализован. Неизменный
+rendered prompt кэшируется для активного набора задач. Prediction mesh лениво
+строится один раз на trajectory и переиспользуется для Chamfer, watertightness и STL export. В
 `metrics_json.timings` сохраняется breakdown времени state graph,
 state save, input preparation, model generation, decode, execution, mesh build и
 exports, а `metrics_json.generation_counts` содержит числа plan tokens, CAD

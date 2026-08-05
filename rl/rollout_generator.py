@@ -51,7 +51,8 @@ from rl.schemas import (
     canonical_json,
 )
 
-PARALLEL_GENERATOR_VERSION = "rollout-generator-v2-parallel"
+PARALLEL_GENERATOR_VERSION = "rollout-generator-v4-vectorized-predict"
+SYSTEMIC_GENERATION_ERROR_LIMIT = 8
 
 
 def file_sha256(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
@@ -358,16 +359,9 @@ def decode_step_generation(
     ]
     cad_start_id = tokenizer.convert_tokens_to_ids("<|cad_start|>")
     cad_pad_id = tokenizer.convert_tokens_to_ids("<|cad_pad|>")
-    lm_token_ids = [
+    padded_lm_token_ids = [
         token_id for token_id in token_values if token_id != cad_pad_id
     ]
-    try:
-        cad_start_position = lm_token_ids.index(cad_start_id)
-    except ValueError as exc:
-        raise ValueError(
-            "Generation produced CAD actions without a <|cad_start|> token."
-        ) from exc
-    plan_text = tokenizer.decode(lm_token_ids[:cad_start_position])
     behavior = {
         name: [float(value) for value in behavior_log_probs.get(name, [])]
         for name in ("plan", "label", "parameter", "pointer")
@@ -381,10 +375,32 @@ def decode_step_generation(
         raise ValueError(
             "Behavior structured log-probabilities do not align with actions."
         )
-    if len(behavior["plan"]) != len(lm_token_ids):
+    sampled_lm_token_count = len(behavior["plan"])
+    if len(padded_lm_token_ids) < sampled_lm_token_count:
         raise ValueError(
             "Behavior LM log-probabilities do not align with generated LM tokens."
         )
+    trailing_token_ids = padded_lm_token_ids[sampled_lm_token_count:]
+    allowed_padding_ids = {151643}
+    tokenizer_pad_id = getattr(tokenizer, "pad_token_id", None)
+    if tokenizer_pad_id is not None:
+        allowed_padding_ids.add(int(tokenizer_pad_id))
+    if any(
+        token_id not in allowed_padding_ids
+        for token_id in trailing_token_ids
+    ):
+        raise ValueError(
+            "Generated LM tokens contain a non-padding suffix without "
+            "behavior log-probabilities."
+        )
+    lm_token_ids = padded_lm_token_ids[:sampled_lm_token_count]
+    try:
+        cad_start_position = lm_token_ids.index(cad_start_id)
+    except ValueError as exc:
+        raise ValueError(
+            "Generation produced CAD actions without a <|cad_start|> token."
+        ) from exc
+    plan_text = tokenizer.decode(lm_token_ids[:cad_start_position])
     return (
         plan_text,
         lm_token_ids,
@@ -877,12 +893,17 @@ class RolloutGenerator:
         if cached is not None:
             self._prompt_cache.move_to_end(prompt)
             return cached
-        messages = [prompt_message(prompt)]
+        messages = prompt_message(prompt)
         rendered = self.processor.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
         )
+        if not isinstance(rendered, str):
+            raise TypeError(
+                "Expected apply_chat_template to return one rendered string, "
+                f"got {type(rendered).__name__}."
+            )
         self._prompt_cache[prompt] = rendered
         if len(self._prompt_cache) > self._prompt_cache_size:
             self._prompt_cache.popitem(last=False)
@@ -893,7 +914,11 @@ class RolloutGenerator:
         prompts: Sequence[str],
         graphs: Sequence[dgl.DGLGraph],
         sampling_generators: Sequence[Optional[torch.Generator]],
-    ) -> Tuple[List[Any], Dict[str, float]]:
+    ) -> Tuple[
+        List[Optional[Any]],
+        List[Optional[str]],
+        Dict[str, float],
+    ]:
         if not prompts or len(prompts) != len(graphs):
             raise ValueError("Batched generation requires aligned prompts/graphs.")
         if len(sampling_generators) != len(prompts):
@@ -946,22 +971,31 @@ class RolloutGenerator:
             behavior_log_probs,
         ) = outputs
         started_at = time.monotonic()
-        decoded = [
-            decode_step_generation(
-                tokenizer=self.processor.tokenizer,
-                generated_ids=generated_ids[index],
-                parameter_map=parameter_maps[index],
-                labels=labels[index],
-                parameters=parameters[index],
-                pointers=pointers[index],
-                behavior_log_probs=behavior_log_probs[index],
-            )
-            for index in range(len(prompts))
-        ]
+        decoded: List[Optional[Any]] = []
+        decode_errors: List[Optional[str]] = []
+        for index in range(len(prompts)):
+            try:
+                action = decode_step_generation(
+                    tokenizer=self.processor.tokenizer,
+                    generated_ids=generated_ids[index],
+                    parameter_map=parameter_maps[index],
+                    labels=labels[index],
+                    parameters=parameters[index],
+                    pointers=pointers[index],
+                    behavior_log_probs=behavior_log_probs[index],
+                )
+            except ValueError as exc:
+                if str(exc) != "Generation finished without a CAD action.":
+                    raise
+                decoded.append(None)
+                decode_errors.append(exception_summary(exc))
+            else:
+                decoded.append(action)
+                decode_errors.append(None)
         timings["generation_decode_time_seconds"] = (
             time.monotonic() - started_at
         )
-        return decoded, timings
+        return decoded, decode_errors, timings
 
 
 def _limit_episodes(
@@ -1042,6 +1076,8 @@ def _run_batched_jobs(
     ready: Deque[Tuple[int, str, Dict[str, Any]]] = deque()
     next_job_index = 0
     completed = 0
+    last_generation_error: Optional[str] = None
+    consecutive_generation_errors = 0
 
     def start_process(worker_id: int) -> mp.Process:
         process = context.Process(
@@ -1173,7 +1209,11 @@ def _run_batched_jobs(
             generator_states = [rng.get_state() for rng in batch_generators]
             started_at = time.monotonic()
             try:
-                decoded, action_timings = generator._generate_actions(
+                (
+                    decoded,
+                    decode_errors,
+                    action_timings,
+                ) = generator._generate_actions(
                     prompts=[job.episode.prompt for job in batch_jobs],
                     graphs=[
                         _graph_from_payload(graph_payload)
@@ -1182,16 +1222,39 @@ def _run_batched_jobs(
                     sampling_generators=batch_generators,
                 )
                 generation_seconds = time.monotonic() - started_at
-                for batch_index, (worker_id, _, _) in enumerate(batch):
-                    input_queues[worker_id].put(
-                        (
-                            "action",
-                            decoded[batch_index],
-                            action_timings,
-                            generation_seconds,
-                            len(batch),
-                        )
+                successful_decodes = sum(
+                    error is None for error in decode_errors
+                )
+                last_generation_error = None
+                consecutive_generation_errors = 0
+                if successful_decodes < len(batch):
+                    error_counts = Counter(
+                        error for error in decode_errors if error is not None
                     )
+                    logger.warning(
+                        "Decoded {}/{} batch items; failing only {} invalid "
+                        "item(s) without repeating GPU generation: {}",
+                        successful_decodes,
+                        len(batch),
+                        len(batch) - successful_decodes,
+                        dict(error_counts),
+                    )
+                for batch_index, (worker_id, _, _) in enumerate(batch):
+                    decode_error = decode_errors[batch_index]
+                    if decode_error is None:
+                        input_queues[worker_id].put(
+                            (
+                                "action",
+                                decoded[batch_index],
+                                action_timings,
+                                generation_seconds,
+                                len(batch),
+                            )
+                        )
+                    else:
+                        input_queues[worker_id].put(
+                            ("fail", "generation_error", decode_error)
+                        )
                 effective_batch_size = min(
                     oom_batch_limit,
                     max(effective_batch_size, len(batch) * 2),
@@ -1229,6 +1292,20 @@ def _run_batched_jobs(
                         )
                     continue
                 error = exception_summary(exc)
+                if error == last_generation_error:
+                    consecutive_generation_errors += 1
+                else:
+                    last_generation_error = error
+                    consecutive_generation_errors = 1
+                if (
+                    consecutive_generation_errors
+                    >= SYSTEMIC_GENERATION_ERROR_LIMIT
+                ):
+                    raise RuntimeError(
+                        "Aborting rollout generation after "
+                        f"{consecutive_generation_errors} consecutive "
+                        f"identical generation errors: {error}"
+                    ) from exc
                 for worker_id, _, _ in batch:
                     input_queues[worker_id].put(
                         ("fail", "generation_error", error)
@@ -1605,8 +1682,8 @@ def validate_rollout_config(config: Dict[str, Any]) -> None:
     if str(config["generator_version"]) != PARALLEL_GENERATOR_VERSION:
         raise ValueError(
             "This entry point only supports "
-            f"generator_version={PARALLEL_GENERATOR_VERSION!r}; use --force "
-            "to replace a legacy rollout run."
+            f"generator_version={PARALLEL_GENERATOR_VERSION!r}. Update the "
+            "config; use a new run_id or --force for an older rollout store."
         )
     for key in ("episodes_root", "source_dataset_root"):
         if not Path(config[key]).is_dir():

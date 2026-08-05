@@ -272,8 +272,12 @@ class PointerCAD(nn.Module):
             )
         finish_mark = [False] * batch_size
         generated_ids = input_ids.clone()
+        current_token_ids = [
+            int(value) for value in input_ids[:, -1].detach().cpu().tolist()
+        ]
         generated_mask = attention_mask.clone()
         generated_label = [torch.zeros((0), dtype=input_ids.dtype, device=input_ids.device) for _ in range(batch_size)]
+        generated_label_values = [[] for _ in range(batch_size)]
         generated_parameter = [torch.zeros((0), dtype=input_ids.dtype, device=input_ids.device) for _ in range(batch_size)]
         generated_pointer = [torch.zeros((0), dtype=input_ids.dtype, device=input_ids.device) for _ in range(batch_size)]
         behavior_log_probs = [
@@ -328,15 +332,97 @@ class PointerCAD(nn.Module):
 
             past_key_values = outputs.past_key_values
             hidden_states = outputs.last_hidden_state[:, -1, :]  # shape: batch * hidden_size
-            
+
+            cad_indices = []
+            lm_indices = []
+            for idx in range(batch_size):
+                if finish_mark[idx]:
+                    continue
+                is_cad_step = current_token_ids[idx] == 151671 or (
+                    current_token_ids[idx] == 151673
+                    and generated_label_values[idx][-1]
+                    != TOKEN.index("<|model_end|>")
+                    and generated_label_values[idx][-1]
+                    != TOKEN.index("<|part_end|>")
+                )
+                if is_cad_step:
+                    cad_indices.append(idx)
+                else:
+                    lm_indices.append(idx)
+
+            cad_rows = {idx: row for row, idx in enumerate(cad_indices)}
+            lm_rows = {idx: row for row, idx in enumerate(lm_indices)}
+            if cad_indices:
+                cad_hidden_states = hidden_states.index_select(
+                    0,
+                    torch.tensor(
+                        cad_indices,
+                        dtype=torch.long,
+                        device=hidden_states.device,
+                    ),
+                )
+                batch_label_logits = self.label_head(cad_hidden_states)
+                batch_parameter_predictions = self.parameter_head(
+                    cad_hidden_states
+                )
+                batch_pointer_predictions = self.pointer_head(
+                    cad_hidden_states
+                )
+            else:
+                batch_label_logits = None
+                batch_parameter_predictions = None
+                batch_pointer_predictions = None
+            if lm_indices:
+                lm_hidden_states = hidden_states.index_select(
+                    0,
+                    torch.tensor(
+                        lm_indices,
+                        dtype=torch.long,
+                        device=hidden_states.device,
+                    ),
+                )
+                batch_lm_logits = self.lm_head(lm_hidden_states).clone()
+                batch_lm_logits[:, len(tokenizer):] = -1e9
+                batch_lm_logits[:, 151673] = -1e9
+                for lm_row, idx in enumerate(lm_indices):
+                    if param_embeds[idx] is not None:
+                        batch_lm_logits[lm_row, 151671] = -1e9
+                    else:
+                        batch_lm_logits[lm_row, 151672] = -1e9
+                scaled_lm_logits = batch_lm_logits / temperature_lm
+                if mode == "sample":
+                    scaled_lm_logits = scaled_lm_logits - torch.max(
+                        scaled_lm_logits, dim=1, keepdim=True
+                    ).values
+                    scaled_lm_logits = torch.nan_to_num(
+                        scaled_lm_logits,
+                        nan=0.0,
+                        posinf=1e4,
+                        neginf=-1e4,
+                    )
+                batch_lm_log_probs = F.log_softmax(
+                    scaled_lm_logits, dim=1
+                )
+                batch_lm_probabilities = (
+                    batch_lm_log_probs.exp()
+                    if mode == "sample"
+                    else None
+                )
+            else:
+                batch_lm_logits = None
+                batch_lm_log_probs = None
+                batch_lm_probabilities = None
+
             generated_ids_list = [151643] * batch_size
+            selected_lm_token_ids = [0] * len(lm_indices)
             for idx in range(batch_size):
                 if finish_mark[idx]:
                     continue
 
-                if generated_ids[idx][-1] == 151671 or ((generated_ids[idx][-1] == 151673) and (generated_label[idx][-1] != TOKEN.index("<|model_end|>")) and (generated_label[idx][-1] != TOKEN.index("<|part_end|>"))):
+                if idx in cad_rows:
                     # is CAD generation step
-                    label_logits = self.label_head(hidden_states[idx])
+                    cad_row = cad_rows[idx]
+                    label_logits = batch_label_logits[cad_row]
                     if mode == "sample":
                         label_logits = label_logits.clone()
                         parameter_map = param_embeds[idx]
@@ -344,10 +430,10 @@ class PointerCAD(nn.Module):
                             label_logits[TOKEN.index("<|length_value|>")] = -1e9
                         if parameter_map is None or parameter_map["angle"].shape[0] == 0:
                             label_logits[TOKEN.index("<|angle_value|>")] = -1e9
-                        if generated_ids[idx][-1] == 151671:
+                        if current_token_ids[idx] == 151671:
                             label_logits[TOKEN.index("<|pointer_enable|>")] = -1e9
                         elif (
-                            generated_label[idx][-1] != TOKEN.index("<|sketch_start|>")
+                            generated_label_values[idx][-1] != TOKEN.index("<|sketch_start|>")
                             and pointer_crv[idx].shape[0] == 0
                         ):
                             label_logits[TOKEN.index("<|pointer_enable|>")] = -1e9
@@ -364,7 +450,10 @@ class PointerCAD(nn.Module):
                         logits = label_logits / temperature_label
                         pred_label = torch.argmax(label_logits, dim=0)
 
-                    selected_label_logp = F.log_softmax(logits, dim=0)[pred_label]
+                    pred_label_value = int(pred_label.item())
+                    selected_label_logp = F.log_softmax(logits, dim=0)[
+                        pred_label_value
+                    ]
                     selected_parameter_logp = torch.tensor(
                         0.0, device=input_ids.device
                     )
@@ -372,16 +461,18 @@ class PointerCAD(nn.Module):
                         0.0, device=input_ids.device
                     )
 
-                    if pred_label in [TOKEN.index("<|length_value|>"), TOKEN.index("<|angle_value|>")]:
-                        pred_parameter: torch.Tensor = self.parameter_head(hidden_states[idx])
+                    if pred_label_value in [TOKEN.index("<|length_value|>"), TOKEN.index("<|angle_value|>")]:
+                        pred_parameter: torch.Tensor = (
+                            batch_parameter_predictions[cad_row]
+                        )
 
-                        if pred_label == TOKEN.index("<|length_value|>"):
+                        if pred_label_value == TOKEN.index("<|length_value|>"):
                             pred_length = F.normalize(pred_parameter, p=2, dim=0, eps=1e-6)
                             cand_length = F.normalize(param_embeds[idx]["length"], p=2, dim=1, eps=1e-6).type_as(pred_length)
 
                             if cand_length.numel() == 0:
                                 pred_parameter = torch.tensor(-len(STANDARD_PLANES) - 1, dtype=generated_parameter[idx].dtype, device=generated_parameter[idx].device)
-                                pred_label = torch.tensor(TOKEN.index("<|padding|>"), dtype=pred_label.dtype, device=pred_label.device)
+                                pred_label_value = TOKEN.index("<|padding|>")
                             else:
                                 sim_length = torch.matmul(pred_length, cand_length.T) * self.parameter_tau.exp()
                                 if mode == "argmax":
@@ -404,7 +495,7 @@ class PointerCAD(nn.Module):
 
                             if cand_angle.numel() == 0:
                                 pred_parameter = torch.tensor(-len(STANDARD_PLANES) - 1, dtype=generated_parameter[idx].dtype, device=generated_parameter[idx].device)
-                                pred_label = torch.tensor(TOKEN.index("<|padding|>"), dtype=pred_label.dtype, device=pred_label.device)
+                                pred_label_value = TOKEN.index("<|padding|>")
                             else:
                                 sim_angle = torch.matmul(pred_angle, cand_angle.T) * self.parameter_tau.exp()
                                 if mode == "argmax":
@@ -425,9 +516,11 @@ class PointerCAD(nn.Module):
                         pred_parameter = torch.tensor(-len(STANDARD_PLANES) - 1, dtype=generated_parameter[idx].dtype, device=generated_parameter[idx].device)
 
 
-                    if generated_ids[idx][-1] != 151671 and pred_label == TOKEN.index("<|pointer_enable|>"):
-                        pred_pointer: torch.Tensor = self.pointer_head(hidden_states[idx])
-                        if generated_label[idx][-1] == TOKEN.index("<|sketch_start|>"):
+                    if current_token_ids[idx] != 151671 and pred_label_value == TOKEN.index("<|pointer_enable|>"):
+                        pred_pointer: torch.Tensor = (
+                            batch_pointer_predictions[cad_row]
+                        )
+                        if generated_label_values[idx][-1] == TOKEN.index("<|sketch_start|>"):
                             pred = pred_pointer.unsqueeze(0).expand(pointer_srf[idx].size(0), -1)
                             cos_sim = F.cosine_similarity(pred, pointer_srf[idx], dim=1) * self.pointer_tau.exp()
                             if mode == "argmax":
@@ -465,61 +558,62 @@ class PointerCAD(nn.Module):
                                 )[pred_pointer]
                             else:
                                 pred_pointer = torch.tensor(-len(STANDARD_PLANES) - 1, dtype=generated_pointer[idx].dtype, device=generated_pointer[idx].device)
-                                pred_label = torch.tensor(TOKEN.index("<|pointer_disable|>"), dtype=pred_label.dtype, device=pred_label.device)
+                                pred_label_value = TOKEN.index("<|pointer_disable|>")
                     else:
                         pred_pointer = torch.tensor(-len(STANDARD_PLANES) - 1, dtype=generated_pointer[idx].dtype, device=generated_pointer[idx].device)
-                        if pred_label == TOKEN.index("<|pointer_enable|>"):
-                            pred_label = torch.tensor(TOKEN.index("<|pointer_disable|>"), dtype=pred_label.dtype, device=pred_label.device)
+                        if pred_label_value == TOKEN.index("<|pointer_enable|>"):
+                            pred_label_value = TOKEN.index("<|pointer_disable|>")
 
+                    pred_label = torch.tensor(
+                        pred_label_value,
+                        dtype=generated_label[idx].dtype,
+                        device=generated_label[idx].device,
+                    )
                     generated_label[idx] = torch.cat([generated_label[idx], pred_label.unsqueeze(0)])
+                    generated_label_values[idx].append(pred_label_value)
                     generated_parameter[idx] = torch.cat([generated_parameter[idx], pred_parameter.unsqueeze(0)])
                     generated_pointer[idx] = torch.cat([generated_pointer[idx], pred_pointer.unsqueeze(0)])
                     behavior_log_probs[idx]["label"].append(
-                        float(selected_label_logp.item())
+                        selected_label_logp.clone()
                     )
                     behavior_log_probs[idx]["parameter"].append(
-                        float(selected_parameter_logp.item())
+                        selected_parameter_logp.clone()
                     )
                     behavior_log_probs[idx]["pointer"].append(
-                        float(selected_pointer_logp.item())
+                        selected_pointer_logp.clone()
                     )
                     generated_ids_list[idx] = 151673
                 else:
                     # is LM generation step
-                    pred_logit: torch.Tensor = self.lm_head(hidden_states[idx])
-
-                    illegal_mask = torch.zeros_like(pred_logit, dtype=torch.bool)
-                    illegal_mask[len(tokenizer):] = True  # unknown token handling
-                    illegal_mask[151673] = True  # unsupport token (<|cad_pad|>) handling
-                    if param_embeds[idx] is not None: illegal_mask[151671] = True  # <|cad_start|> token appear twice handling
-                    else: illegal_mask[151672] = True  # <|cad_end|> token appear before <|cad_start|> handling
-
-                    pred_logit = pred_logit.masked_fill(illegal_mask, -1e9)
+                    lm_row = lm_rows[idx]
+                    pred_logit: torch.Tensor = batch_lm_logits[lm_row]
 
                     if mode == "argmax":
                         pred_id = torch.argmax(pred_logit, dim=0)
                     else:
-                        logits = pred_logit / temperature_lm
-                        logits = logits - torch.max(logits)
-                        logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
                         pred_id = torch.multinomial(
-                            F.softmax(logits, dim=0),
+                            batch_lm_probabilities[lm_row],
                             num_samples=1,
                             generator=sampling_generators[idx],
                         ).squeeze(0)
 
-                    if pred_id >= len(tokenizer): pred_id = 151643  # unknown token handling
-                    if pred_id == 151673: pred_id = 151643  # unsupport token (<|cad_pad|>) handling
-                    if pred_id == 151671 and param_embeds[idx] is not None: pred_id = 151643  # <|cad_start|> token appear twice handling
+                    pred_id_value = int(pred_id.item())
+                    if pred_id_value >= len(tokenizer):
+                        pred_id_value = 151643
+                    if pred_id_value == 151673:
+                        pred_id_value = 151643
+                    if (
+                        pred_id_value == 151671
+                        and param_embeds[idx] is not None
+                    ):
+                        pred_id_value = 151643
 
-                    generated_ids_list[idx] = pred_id.item() if torch.is_tensor(pred_id) else pred_id
-                    behavior_log_probs[idx]["plan"].append(
-                        float(F.log_softmax(pred_logit / temperature_lm, dim=0)[pred_id].item())
-                    )
-                    if pred_id in [151643, 151645]:
+                    generated_ids_list[idx] = pred_id_value
+                    selected_lm_token_ids[lm_row] = pred_id_value
+                    if pred_id_value in [151643, 151645]:
                         finish_mark[idx] = True
 
-                    if pred_id == 151671:  # <|cad_start|>
+                    if pred_id_value == 151671:  # <|cad_start|>
                         # finish plan, start CAD generation
                         plan_ids = generated_ids[idx][seq_length:]
                         plan_txt = tokenizer.decode(plan_ids)
@@ -531,6 +625,20 @@ class PointerCAD(nn.Module):
 
                         parameter_maps[idx] = parameter_tensor
                         param_embeds[idx] = self.parameter(parameter_tensor)
+
+            if lm_indices:
+                selected_lm_log_probs = batch_lm_log_probs.gather(
+                    1,
+                    torch.tensor(
+                        selected_lm_token_ids,
+                        dtype=torch.long,
+                        device=batch_lm_log_probs.device,
+                    ).unsqueeze(1),
+                ).squeeze(1)
+                for lm_row, idx in enumerate(lm_indices):
+                    behavior_log_probs[idx]["plan"].append(
+                        selected_lm_log_probs[lm_row]
+                    )
 
             generated_ids = torch.cat([generated_ids, torch.tensor(generated_ids_list, dtype=generated_ids.dtype, device=generated_ids.device).unsqueeze(1)], dim=1)
 
@@ -545,21 +653,21 @@ class PointerCAD(nn.Module):
                     generated_pointer_idx = generated_pointer[idx][-1]
                     
                     if generated_parameter_idx >= 0:
-                        if generated_label[idx][-1] == TOKEN.index("<|length_value|>"):
+                        if generated_label_values[idx][-1] == TOKEN.index("<|length_value|>"):
                             parameter_embeds = self.parameter_projection(param_embeds[idx]["length"][generated_parameter_idx])
                         else:
                             parameter_embeds = self.parameter_projection(param_embeds[idx]["angle"][generated_parameter_idx])
                         value_embeds = value_embeds + parameter_embeds
                     
                     if generated_pointer_idx >= -len(STANDARD_PLANES):
-                        pointer_embeds = pointer_srf[idx][generated_pointer_idx + len(STANDARD_PLANES)] if generated_label[idx][-2] == TOKEN.index("<|sketch_start|>") else pointer_crv[idx][generated_pointer_idx]
+                        pointer_embeds = pointer_srf[idx][generated_pointer_idx + len(STANDARD_PLANES)] if generated_label_values[idx][-2] == TOKEN.index("<|sketch_start|>") else pointer_crv[idx][generated_pointer_idx]
                         pointer_embeds = self.pointer_projection(pointer_embeds)
                         value_embeds = value_embeds + pointer_embeds
                     
                     inputs_embeds_next[idx] = value_embeds
             next_token_class = generated_ids[:, -1] == 151671
             for idx in range(batch_size):
-                if (generated_ids[idx, -1] == 151673) and (generated_label[idx][-1] != TOKEN.index("<|model_end|>")) and (generated_label[idx][-1] != TOKEN.index("<|part_end|>")):
+                if (generated_ids_list[idx] == 151673) and (generated_label_values[idx][-1] != TOKEN.index("<|model_end|>")) and (generated_label_values[idx][-1] != TOKEN.index("<|part_end|>")):
                     next_token_class[idx] = True
             inputs_embeds_next = inputs_embeds_next + self.cad_position_embedding(next_token_class.type_as(input_ids))
             if past_key_values is None:
@@ -580,6 +688,7 @@ class PointerCAD(nn.Module):
                 dtype=generated_mask.dtype,
             )
             generated_mask = torch.cat([generated_mask, generated_mask_pad], dim=-1)
+            current_token_ids = generated_ids_list
 
         result = (
             generated_ids[:, seq_length:],
@@ -589,7 +698,37 @@ class PointerCAD(nn.Module):
             generated_pointer,
         )
         if return_log_probs:
-            return (*result, behavior_log_probs)
+            channel_names = ("plan", "label", "parameter", "pointer")
+            flattened_log_probs = []
+            channel_lengths = []
+            for batch_log_probs in behavior_log_probs:
+                for name in channel_names:
+                    values = batch_log_probs[name]
+                    channel_lengths.append(len(values))
+                    flattened_log_probs.extend(values)
+            cpu_log_probs = (
+                torch.stack(flattened_log_probs)
+                .to(dtype=torch.float32, device="cpu")
+                .tolist()
+                if flattened_log_probs
+                else []
+            )
+            serialized_behavior_log_probs = []
+            offset = 0
+            length_index = 0
+            for _ in behavior_log_probs:
+                serialized_batch_log_probs = {}
+                for name in channel_names:
+                    length = channel_lengths[length_index]
+                    serialized_batch_log_probs[name] = cpu_log_probs[
+                        offset : offset + length
+                    ]
+                    offset += length
+                    length_index += 1
+                serialized_behavior_log_probs.append(
+                    serialized_batch_log_probs
+                )
+            return (*result, serialized_behavior_log_probs)
         return result
 
     def get_param_groups(self, base_lr: float, tau_lr: float, weight_decay: float):

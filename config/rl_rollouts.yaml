@@ -1,5 +1,5 @@
 run_id: "sft-05b-k5"
-generator_version: "rollout-generator-v2-parallel"
+generator_version: "rollout-generator-v4-vectorized-predict"
 
 episodes_root: "/home/terbium/datasets/paramcad-addon/small-15k/format/pointercad-rl/episodes"
 source_dataset_root: "/mnt/afs_01e/mayi-folder/ParamCAD/dataset/paramcad-addon/dataset"
@@ -21,14 +21,14 @@ model:
   dtype: "bfloat16"
 
 generation:
-  trajectories_per_episode: 2
+  trajectories_per_episode: 3
   base_seed: 0
   # GPU actions are generated together across independent active trajectories.
-  # Keep more CPU workers than batch slots so CAD execution/metrics can overlap
-  # the next GPU batch.
-  batch_size: 8
-  cpu_workers_per_gpu: 12
-  batch_wait_seconds: 0.03
+  # One CPU worker per batch slot is sufficient while GPU generation dominates;
+  # the coordinator caps this value to the CPUs available to each local rank.
+  batch_size: 16
+  cpu_workers_per_gpu: 16
+  batch_wait_seconds: 0.2
   max_episode_steps: 64
   max_generation_steps: 1024
   max_input_length: 3072

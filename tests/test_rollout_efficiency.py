@@ -10,12 +10,15 @@ from rl.cad_environment import evaluate_models
 from rl.rollout_generator import (
     _LazyMesh,
     _RolloutJob,
+    RolloutGenerator,
     build_runtime_config,
+    decode_step_generation,
     _graph_from_payload,
     _graph_to_payload,
     _run_batched_jobs,
     _task_rank,
 )
+from rl.prompts import prompt_message
 from rl.rollout_store import RolloutStore
 from rl.schemas import EpisodeRecord, TrajectoryRecord, canonical_json
 
@@ -128,6 +131,139 @@ class ChamferCompatibilityTest(unittest.TestCase):
 
 
 class ParallelInfrastructureTest(unittest.TestCase):
+    def test_empty_action_fails_only_its_batch_item(self):
+        import torch
+
+        class Inputs(dict):
+            def to(self, _device):
+                return self
+
+        tokenizer = Mock(pad_token_id=151643)
+        tokenizer.convert_tokens_to_ids.side_effect = {
+            "<|cad_start|>": 100,
+            "<|cad_pad|>": 101,
+        }.__getitem__
+        tokenizer.decode.return_value = "plan"
+        processor = Mock(tokenizer=tokenizer)
+        processor.apply_chat_template.return_value = "rendered"
+        processor.return_value = Inputs()
+        model = Mock()
+        model.predict.return_value = (
+            torch.tensor(
+                [
+                    [11, 100, 101, 102],
+                    [11, 151643, 151643, 151643],
+                ]
+            ),
+            [
+                {"length": [], "angle": []},
+                {"length": [], "angle": []},
+            ],
+            [torch.tensor([1]), torch.tensor([])],
+            [torch.tensor([0]), torch.tensor([])],
+            [torch.tensor([0]), torch.tensor([])],
+            [
+                {
+                    "plan": [-0.1, -0.2, -0.3],
+                    "label": [-0.4],
+                    "parameter": [0.0],
+                    "pointer": [0.0],
+                },
+                {
+                    "plan": [-0.1],
+                    "label": [],
+                    "parameter": [],
+                    "pointer": [],
+                },
+            ],
+        )
+        generator = RolloutGenerator(
+            model=model,
+            processor=processor,
+            device=torch.device("cpu"),
+            store=Mock(),
+            source_dataset_root=Path("source"),
+            config={
+                "generation": {
+                    "cpu_workers_per_gpu": 2,
+                    "max_input_length": 32,
+                    "max_generation_steps": 16,
+                    "temperatures": {},
+                }
+            },
+        )
+
+        decoded, errors, _ = generator._generate_actions(
+            prompts=["first", "second"],
+            graphs=[empty_brep_graph(), empty_brep_graph()],
+            sampling_generators=[None, None],
+        )
+
+        self.assertIsNotNone(decoded[0])
+        self.assertIsNone(errors[0])
+        self.assertIsNone(decoded[1])
+        self.assertIn("without a CAD action", errors[1])
+        model.predict.assert_called_once()
+
+    def test_decode_ignores_padding_after_shorter_batched_generation(self):
+        import torch
+
+        tokenizer = Mock(pad_token_id=151643)
+        tokenizer.convert_tokens_to_ids.side_effect = {
+            "<|cad_start|>": 100,
+            "<|cad_pad|>": 101,
+        }.__getitem__
+        tokenizer.decode.return_value = "plan"
+
+        decoded = decode_step_generation(
+            tokenizer=tokenizer,
+            generated_ids=torch.tensor(
+                [11, 100, 101, 102, 151643, 151643]
+            ),
+            parameter_map={"length": [], "angle": []},
+            labels=torch.tensor([1]),
+            parameters=torch.tensor([0]),
+            pointers=torch.tensor([0]),
+            behavior_log_probs={
+                "plan": [-0.1, -0.2, -0.3],
+                "label": [-0.4],
+                "parameter": [0.0],
+                "pointer": [0.0],
+            },
+        )
+
+        self.assertEqual(decoded[0], "plan")
+        self.assertEqual(decoded[1], [11, 100, 102])
+        tokenizer.decode.assert_called_once_with([11])
+
+    def test_batched_prompt_rendering_produces_strings(self):
+        import torch
+
+        processor = Mock()
+        processor.apply_chat_template.side_effect = (
+            lambda messages, **_: f"rendered:{messages[1]['content'][1]['text']}"
+        )
+        generator = RolloutGenerator(
+            model=Mock(),
+            processor=processor,
+            device=torch.device("cpu"),
+            store=Mock(),
+            source_dataset_root=Path("source"),
+            config={"generation": {"cpu_workers_per_gpu": 2}},
+        )
+
+        rendered = [
+            generator._render_prompt(prompt)
+            for prompt in ("first", "second")
+        ]
+
+        self.assertEqual(rendered, ["rendered:first", "rendered:second"])
+        processor.apply_chat_template.assert_any_call(
+            prompt_message("first"),
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
     def test_dgl_graph_crosses_spawn_process_boundary(self):
         context = mp.get_context("spawn")
         output_queue = context.Queue()
