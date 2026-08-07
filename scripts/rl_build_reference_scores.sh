@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -o pipefail
+set -eo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
@@ -14,14 +14,14 @@ if [[ -f "$POINTERCAD_ENV_FILE" ]]; then
     set +a
 fi
 
-CONFIG_PATH="${CONFIG_PATH:-$REPO_ROOT/config/rl_preferences.yaml}"
+CONFIG_PATH="${CONFIG_PATH:-$REPO_ROOT/config/rl_reference_scores.yaml}"
 
 usage() {
     cat <<EOF
-Usage: scripts/rl_build_preferences.sh [options]
+Usage: scripts/rl_build_reference_scores.sh [options]
 
 Options:
-  -c, --config PATH  Preference builder YAML (default: config/rl_preferences.yaml)
+  -c, --config PATH  Score builder YAML (default: config/rl_reference_scores.yaml)
       --help         Show this help
 EOF
 }
@@ -57,7 +57,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ ! -f "$CONFIG_PATH" ]]; then
-    echo "[ERROR] Preference builder config not found: $CONFIG_PATH" >&2
+    echo "[ERROR] Reference score config not found: $CONFIG_PATH" >&2
     exit 1
 fi
 
@@ -73,15 +73,14 @@ conda activate "$POINTERCAD_CONDA_ENV"
 
 POINTERCAD_LOG_ROOT="${POINTERCAD_LOG_ROOT:-$REPO_ROOT/log}"
 LOG_DIR="${LOG_DIR:-$POINTERCAD_LOG_ROOT/rl_data}"
-
 mkdir -p "$LOG_DIR"
-LOG_PATH="$LOG_DIR/build_preferences_$(date +"%Y%m%d_%H%M%S").log"
+LOG_PATH="$LOG_DIR/build_reference_scores_$(date +"%Y%m%d_%H%M%S").log"
 
 echo "[INFO] Conda environment: $POINTERCAD_CONDA_ENV"
 echo "[INFO] Python executable: $(python -c 'import sys; print(sys.executable)')"
 echo "[INFO] Config: $CONFIG_PATH"
 echo "[INFO] Log: $LOG_PATH"
 
-python -u -m preprocessing.build_rl_preferences \
+python -u -m preprocessing.build_rl_reference_scores \
     -c "$CONFIG_PATH" \
     2>&1 | tee "$LOG_PATH"

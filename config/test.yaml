@@ -1,36 +1,53 @@
- # ---------------------------------------------------------------------------- #
- #                      Config for PointerCAD Model Training                      #
- # ---------------------------------------------------------------------------- #
- 
- 
- 
- # ---------------------- Configuration for Model ---------------------- #
+# Deterministic full-episode evaluation. One torchrun rank owns each visible
+# GPU; isolated CPU workers execute OpenCascade and geometry metrics.
+
 model:
   base_model: "Qwen/Qwen2.5-0.5B-Instruct"
-
-
-# --------------- Configuration related to training dataloader --------------- #
-dataset:
-  # Root directory of the dataset
-  dataset_dir: "/home/terbium/datasets/paramcad-addon/smoke"
-  # JSON file containing information about train, test, and validation splits
-  split_filepath: "/home/terbium/datasets/paramcad-addon/smoke/train_val_test.json"
-  # Progressive evaluation currently evaluates one prompt variant per CAD model.
-  prompt_variant: "exp"
-  # Maximum sequence length for input data
-  max_seq_len: 512
-
-
-# ------------------------- Test configuration ------------------------- #
-test:
-  num_workers: 1
-  batch_size: 1
-  prefetch_factor: 1
   checkpoint_path: "/home/terbium/PointerCADv2-RL/log/sft-checkpoints/addon-0.5B-model.pth"
-  log_dir: "./log"
-  save_stl: True
-  save_step: True
+  dtype: "bfloat16"
 
+dataset:
+  dataset_dir: "/home/terbium/datasets/paramcad-addon/small-15k/dataset"
+  split_filepath: "/home/terbium/datasets/paramcad-addon/small-15k/train_val_test.json"
+  episodes_root: "/home/terbium/datasets/paramcad-addon/small-15k/format/pointercad-rl/episodes"
+  split: "test"
+  # Evaluate prompt variants in separate runs; do not average them implicitly.
+  prompt_variant: "exp"
 
-# --------------- Additional information (leave empty for now) --------------- #
-info: "test"
+generation:
+  # The effective batch is reduced automatically after CUDA OOM and grows back
+  # after successful smaller batches.
+  batch_size: 16
+  cpu_workers_per_gpu: 16
+  batch_wait_seconds: 0.02
+  max_episode_steps: 64
+  max_generation_steps: 1024
+  max_input_length: 3072
+  max_models: null
+  base_seed: 0
+
+execution:
+  strict: true
+  cpu_threads_per_worker: 1
+  build_timeout_seconds: 300.0
+  surf_u_samples: 32
+  surf_v_samples: 32
+  curv_u_samples: 32
+
+metrics:
+  version: "geometry-raw-v1"
+  enabled:
+    - chamfer_distance
+    - accuracy
+    - f1
+    - watertight
+  chamfer_points: 8192
+
+outputs:
+  # Meshes are built lazily and reused across CD, watertightness, and STL export.
+  save_step: false
+  save_stl: false
+  save_ground_truth: false
+  suppress_step_export_output: true
+
+info: "small-15k deterministic full-episode evaluation"

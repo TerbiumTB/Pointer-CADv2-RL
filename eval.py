@@ -58,16 +58,27 @@ def main():
     chamfer_f1 = []
     fillet_f1 = []
     watertightness = []
+    iou = []
+    vertex_accuracy = []
+    edge_accuracy = []
+    face_accuracy = []
+    operation_count_error = []
+    evaluation_times = []
+    termination_reasons = []
 
     for model_id, data in results.items():
-        if data is not None and data["status"]:
-            if data["chamfer distance"] is not None:
+        if data is not None:
+            termination_reasons.append(
+                str(data.get("termination_reason", "unknown"))
+            )
+        if data is not None and data.get("status", False):
+            if data.get("chamfer distance") is not None:
                 cd = data["chamfer distance"]
                 if cd >= 1000:
                     logger.warning(f"Abnormal chamfer distance {cd} for model {model_id}")
                 else:
                     chamfer_distance.append(cd)
-            if data["f1"] is not None:
+            if data.get("f1") is not None:
                 if "line" in data["f1"]:
                     line_f1.append(data["f1"]["line"])
                 if "arc" in data["f1"]:
@@ -80,13 +91,32 @@ def main():
                     chamfer_f1.append(data["f1"]["chamfer"])
                 if "fillet" in data["f1"]:
                     fillet_f1.append(data["f1"]["fillet"])
-            if data["is watertight"] is not None:
+            if data.get("is watertight") is not None:
                 watertightness.append(data["is watertight"])
+            raw_metrics = data.get("metrics")
+            if isinstance(raw_metrics, dict):
+                for source_name, destination in (
+                    ("iou", iou),
+                    ("vertex_accuracy", vertex_accuracy),
+                    ("edge_accuracy", edge_accuracy),
+                    ("face_accuracy", face_accuracy),
+                    ("operation_count_error", operation_count_error),
+                ):
+                    value = raw_metrics.get(source_name)
+                    if isinstance(value, (int, float)):
+                        destination.append(float(value))
+                timings = raw_metrics.get("timings")
+                if isinstance(timings, dict):
+                    elapsed = timings.get("evaluation_time_seconds")
+                    if isinstance(elapsed, (int, float)):
+                        evaluation_times.append(float(elapsed))
         else:
             if data is None:
                 error_message.append("No response")
             else:
-                error_message.append(data["error_message"])
+                error_message.append(
+                    str(data.get("error_message", "unknown error"))
+                )
     
     eval_dict = {}
 
@@ -98,6 +128,10 @@ def main():
     total_failures = len(error_types)
     for error, count in error_counter.items():
         eval_dict["failure"]["detail"][error] = (count / total_failures if total_failures > 0 else 0) * 100
+    termination_counter = Counter(termination_reasons)
+    eval_dict["termination"] = {
+        reason: count for reason, count in sorted(termination_counter.items())
+    }
         
     eval_dict['chamfer distance'] = {}
     eval_dict['chamfer distance']['median'] = median_or_na(chamfer_distance)
@@ -115,6 +149,25 @@ def main():
     eval_dict['watertightness'] = (
         statistics.mean(watertightness) * 100 if watertightness else "N/A"
     )
+    eval_dict["geometry"] = {
+        "iou": mean_or_na(iou),
+        "vertex accuracy": (
+            statistics.mean(vertex_accuracy) * 100
+            if vertex_accuracy else "N/A"
+        ),
+        "edge accuracy": (
+            statistics.mean(edge_accuracy) * 100
+            if edge_accuracy else "N/A"
+        ),
+        "face accuracy": (
+            statistics.mean(face_accuracy) * 100
+            if face_accuracy else "N/A"
+        ),
+        "mean operation count error": mean_or_na(operation_count_error),
+    }
+    eval_dict["runtime"] = {
+        "mean evaluation seconds": mean_or_na(evaluation_times),
+    }
 
     json_formatted_str = json.dumps(eval_dict, indent=4)
     print("\n\n")

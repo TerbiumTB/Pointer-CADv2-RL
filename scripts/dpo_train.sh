@@ -14,6 +14,59 @@ if [[ -f "$POINTERCAD_ENV_FILE" ]]; then
     set +a
 fi
 
+CONFIG_PATH="${CONFIG_PATH:-$REPO_ROOT/config/dpo_train.yaml}"
+TEST_MODE=false
+
+usage() {
+    cat <<EOF
+Usage: scripts/dpo_train.sh [options]
+
+Options:
+  -c, --config PATH  DPO training YAML (default: config/dpo_train.yaml)
+  -t, --test         Use a single-node local distributed setup
+      --help         Show this help
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -c|--config)
+            if [[ $# -lt 2 || -z "$2" ]]; then
+                echo "[ERROR] $1 requires a config path." >&2
+                exit 2
+            fi
+            CONFIG_PATH="$2"
+            shift 2
+            ;;
+        --config=*)
+            CONFIG_PATH="${1#*=}"
+            if [[ -z "$CONFIG_PATH" ]]; then
+                echo "[ERROR] --config requires a config path." >&2
+                exit 2
+            fi
+            shift
+            ;;
+        -t|--test)
+            TEST_MODE=true
+            shift
+            ;;
+        --help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "[ERROR] Unknown argument: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [[ ! -f "$CONFIG_PATH" ]]; then
+    echo "[ERROR] DPO training config not found: $CONFIG_PATH" >&2
+    exit 1
+fi
+
 POINTERCAD_CONDA_ENV="${POINTERCAD_CONDA_ENV:-pointercad}"
 POINTERCAD_CONDA_EXE="${POINTERCAD_CONDA_EXE:-conda}"
 if ! CONDA_HOOK="$("$POINTERCAD_CONDA_EXE" shell.bash hook)"; then
@@ -25,7 +78,6 @@ eval "$CONDA_HOOK"
 conda activate "$POINTERCAD_CONDA_ENV"
 
 POINTERCAD_LOG_ROOT="${POINTERCAD_LOG_ROOT:-$REPO_ROOT/log}"
-CONFIG_PATH="${CONFIG_PATH:-$REPO_ROOT/config/dpo_train.yaml}"
 LOG_DIR="${LOG_DIR:-$POINTERCAD_LOG_ROOT/dpo_launch}"
 PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
@@ -44,13 +96,6 @@ NC='\033[0m'
 echo -e "${BLUE}=============================="
 echo -e "   DPO Training Launch Script"
 echo -e "==============================${NC}"
-
-TEST_MODE=false
-for argument in "$@"; do
-    case "$argument" in
-        --test|-t) TEST_MODE=true ;;
-    esac
-done
 
 if "$TEST_MODE"; then
     MASTER_ADDR="${MASTER_ADDR:-localhost}"

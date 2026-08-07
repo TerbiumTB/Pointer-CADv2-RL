@@ -14,6 +14,53 @@ if [[ -f "$POINTERCAD_ENV_FILE" ]]; then
     set +a
 fi
 
+CONFIG_PATH="${CONFIG_PATH:-$REPO_ROOT/config/rl_dataset.yaml}"
+
+usage() {
+    cat <<EOF
+Usage: scripts/rl_build_episodes.sh [options]
+
+Options:
+  -c, --config PATH  Episode builder YAML (default: config/rl_dataset.yaml)
+      --help         Show this help
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -c|--config)
+            if [[ $# -lt 2 || -z "$2" ]]; then
+                echo "[ERROR] $1 requires a config path." >&2
+                exit 2
+            fi
+            CONFIG_PATH="$2"
+            shift 2
+            ;;
+        --config=*)
+            CONFIG_PATH="${1#*=}"
+            if [[ -z "$CONFIG_PATH" ]]; then
+                echo "[ERROR] --config requires a config path." >&2
+                exit 2
+            fi
+            shift
+            ;;
+        --help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "[ERROR] Unknown argument: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [[ ! -f "$CONFIG_PATH" ]]; then
+    echo "[ERROR] Episode builder config not found: $CONFIG_PATH" >&2
+    exit 1
+fi
+
 POINTERCAD_CONDA_ENV="${POINTERCAD_CONDA_ENV:-pointercad}"
 POINTERCAD_CONDA_EXE="${POINTERCAD_CONDA_EXE:-conda}"
 if ! CONDA_HOOK="$("$POINTERCAD_CONDA_EXE" shell.bash hook)"; then
@@ -25,7 +72,6 @@ eval "$CONDA_HOOK"
 conda activate "$POINTERCAD_CONDA_ENV"
 
 POINTERCAD_LOG_ROOT="${POINTERCAD_LOG_ROOT:-$REPO_ROOT/log}"
-CONFIG_PATH="${CONFIG_PATH:-$REPO_ROOT/config/rl_dataset.yaml}"
 LOG_DIR="${LOG_DIR:-$POINTERCAD_LOG_ROOT/rl_data}"
 
 mkdir -p "$LOG_DIR"

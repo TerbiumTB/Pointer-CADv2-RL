@@ -75,6 +75,19 @@ The preference builder reads `config/rl_preferences.yaml`:
 python -m preprocessing.build_rl_preferences -c config/rl_preferences.yaml
 ```
 
+When rollouts were sampled from the frozen DPO reference checkpoint with all
+four temperatures equal to `1.0`, materialize cached reference scores directly
+from their stored behavior log-probabilities:
+
+```bash
+python -m preprocessing.build_rl_reference_scores \
+    -c config/rl_reference_scores.yaml
+```
+
+The builder verifies the checkpoint SHA256 against the rollout run config,
+sums all four channels over every stored step and appends idempotent
+`ScoreRecord` shards. It does not run model inference or CAD execution.
+
 All builders require `pyarrow`. Rollout generation additionally requires the
 full PointerCAD, DGL and OpenCascade environment.
 
@@ -85,19 +98,21 @@ resolve paths relative to the repository and save console logs:
 ./scripts/rl_build_episodes.sh
 ./scripts/rl_generate_rollouts.sh
 ./scripts/rl_build_preferences.sh
+./scripts/rl_build_reference_scores.sh
 ./scripts/dpo_train.sh
 ```
 
 Settings can be overridden without editing a script:
 
 ```bash
-CONFIG_PATH=/path/to/rl_rollouts.yaml \
-  ./scripts/rl_generate_rollouts.sh --test
-
-CONFIG_PATH=/path/to/dpo_train.yaml NUM_GPUS=4 \
-  ./scripts/dpo_train.sh --test
+./scripts/rl_build_episodes.sh -c /path/to/rl_dataset.yaml
+./scripts/rl_generate_rollouts.sh --config /path/to/rl_rollouts.yaml
+./scripts/rl_build_preferences.sh -c /path/to/rl_preferences.yaml
+./scripts/rl_build_reference_scores.sh -c /path/to/rl_reference_scores.yaml
+NUM_GPUS=4 ./scripts/dpo_train.sh --config /path/to/dpo_train.yaml --test
 ```
 
+The `CONFIG_PATH` environment variable remains available as an alternative.
 Common overrides are `CONDA_ENV_NAME`, `HF_HOME`, `CONFIG_PATH` and `LOG_DIR`.
 The scripts preserve scheduler-provided `CUDA_VISIBLE_DEVICES` instead of
 overwriting it. Without `--test` they load `~/dist_env.sh` or fall back to
@@ -134,6 +149,24 @@ Reference modes:
 The default uses `model` and therefore needs memory for both policy and frozen
 reference. `cached` avoids the second model, but rollout preparation must have
 materialized scores for every referenced trajectory.
+
+DPO enables deterministic layer-wise gradient checkpointing by default through
+`training.gradient_checkpointing`. Decoder layers are recomputed during
+backward while dropout and BatchNorm remain in eval mode. The LM selected-token
+loss is also checkpointed in small vocabulary chunks, avoiding retained
+float32 `[tokens, vocabulary]` intermediates. These settings trade additional
+compute for substantially lower full-episode activation memory.
+
+`model.max_input_length` must match the rollout generator's input truncation.
+`model.max_replay_length` is a separate, larger bound for that input plus the
+stored generated positions; with the default 3072 input and 1024 generation
+limits it is 4096. Exact replay never silently truncates a stored completion.
+
+Standard CAD evaluation does not create these scores: it generates new
+deterministic trajectories and geometry metrics instead of scoring the stored
+rollout actions. For behavior-derived scores, set
+`reference.checkpoint_hash` to the exact SHA256 printed by the reference-score
+builder and switch `reference.mode` to `cached`.
 
 ## Naming
 

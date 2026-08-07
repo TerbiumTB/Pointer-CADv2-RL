@@ -19,9 +19,13 @@ class FakeBackbone(nn.Module):
     def __init__(self):
         super().__init__()
         self.embeddings = nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE)
+        self.gradient_checkpointing_kwargs = None
 
     def get_input_embeddings(self):
         return self.embeddings
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        self.gradient_checkpointing_kwargs = gradient_checkpointing_kwargs
 
     def forward(
         self,
@@ -98,6 +102,72 @@ def lightweight_pointercad(lm_indices=(151643,), label_indices=(0,)):
 
 
 class BatchedPredictTest(unittest.TestCase):
+    def test_gradient_checkpointing_uses_non_reentrant_mode(self):
+        model = lightweight_pointercad()
+
+        model.enable_gradient_checkpointing()
+
+        self.assertEqual(
+            model.model.gradient_checkpointing_kwargs,
+            {"use_reentrant": False},
+        )
+
+    def test_forward_projects_only_requested_lm_positions(self):
+        input_ids = torch.tensor(
+            [[42, 43, 44, 45], [46, 47, 48, 49]]
+        )
+        attention_mask = torch.ones_like(input_ids)
+
+        default_model = lightweight_pointercad()
+        default_logits = default_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            breps=empty_brep_batch(2),
+            parameter_maps=None,
+        )[0]
+        self.assertEqual(default_model.lm_head.batch_sizes, [6])
+        self.assertEqual([value.shape[0] for value in default_logits], [3, 3])
+
+        masked_model = lightweight_pointercad()
+        lm_logits_mask = torch.tensor(
+            [[False, True, False, False], [True, False, True, False]]
+        )
+        masked_logits = masked_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            breps=empty_brep_batch(2),
+            parameter_maps=None,
+            lm_logits_mask=lm_logits_mask,
+        )[0]
+        self.assertEqual(masked_model.lm_head.batch_sizes, [3])
+        self.assertEqual([value.shape[0] for value in masked_logits], [1, 2])
+
+    def test_forward_anchor_connects_skipped_conditional_modules(self):
+        model = lightweight_pointercad()
+        model.brep = nn.Linear(2, 2)
+        model.parameter = nn.Linear(2, 2)
+        input_ids = torch.tensor([[42, 43]])
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            breps=empty_brep_batch(1),
+            parameter_maps=None,
+            ensure_conditional_parameter_usage=True,
+        )
+
+        (outputs[5] * 0.0).backward()
+
+        conditional_modules = (
+            model.brep,
+            model.parameter,
+            model.parameter_projection,
+            model.pointer_projection,
+        )
+        for module in conditional_modules:
+            for parameter in module.parameters():
+                self.assertIsNotNone(parameter.grad)
+                self.assertEqual(torch.count_nonzero(parameter.grad).item(), 0)
+
     def test_mixed_lm_and_structured_rows_preserve_order(self):
         model_end = TOKEN.index("<|model_end|>")
         model = lightweight_pointercad(label_indices=(model_end,))

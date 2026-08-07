@@ -1,0 +1,21 @@
+# Legacy config for test.old.py and scripts/test.old.sh.
+
+model:
+  base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+
+dataset:
+  dataset_dir: "/home/terbium/datasets/paramcad-addon/smoke"
+  split_filepath: "/home/terbium/datasets/paramcad-addon/smoke/train_val_test.json"
+  prompt_variant: "exp"
+  max_seq_len: 512
+
+test:
+  num_workers: 1
+  batch_size: 1
+  prefetch_factor: 1
+  checkpoint_path: "/home/terbium/PointerCADv2-RL/log/sft-checkpoints/addon-0.5B-model.pth"
+  log_dir: "./log"
+  save_stl: true
+  save_step: true
+
+info: "legacy test"

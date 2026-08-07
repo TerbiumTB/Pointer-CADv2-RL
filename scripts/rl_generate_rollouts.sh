@@ -14,6 +14,57 @@ if [[ -f "$POINTERCAD_ENV_FILE" ]]; then
     set +a
 fi
 
+CONFIG_PATH="${CONFIG_PATH:-$REPO_ROOT/config/rl_rollouts.yaml}"
+FORWARD_ARGS=()
+
+usage() {
+    cat <<EOF
+Usage: scripts/rl_generate_rollouts.sh [options]
+
+Options:
+  -c, --config PATH             Rollout YAML (default: config/rl_rollouts.yaml)
+  -f, --force                   Recreate the target rollout run
+      --batch-size N            Override generation.batch_size
+      --cpu-workers-per-gpu N   Override generation.cpu_workers_per_gpu
+      --batch-wait-seconds N    Override generation.batch_wait_seconds
+      --help                    Show this help
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -c|--config)
+            if [[ $# -lt 2 || -z "$2" ]]; then
+                echo "[ERROR] $1 requires a config path." >&2
+                exit 2
+            fi
+            CONFIG_PATH="$2"
+            shift 2
+            ;;
+        --config=*)
+            CONFIG_PATH="${1#*=}"
+            if [[ -z "$CONFIG_PATH" ]]; then
+                echo "[ERROR] --config requires a config path." >&2
+                exit 2
+            fi
+            shift
+            ;;
+        --help)
+            usage
+            exit 0
+            ;;
+        *)
+            FORWARD_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [[ ! -f "$CONFIG_PATH" ]]; then
+    echo "[ERROR] Rollout config not found: $CONFIG_PATH" >&2
+    exit 1
+fi
+
 POINTERCAD_CONDA_ENV="${POINTERCAD_CONDA_ENV:-pointercad}"
 POINTERCAD_CONDA_EXE="${POINTERCAD_CONDA_EXE:-conda}"
 if ! CONDA_HOOK="$("$POINTERCAD_CONDA_EXE" shell.bash hook)"; then
@@ -25,7 +76,6 @@ eval "$CONDA_HOOK"
 conda activate "$POINTERCAD_CONDA_ENV"
 
 POINTERCAD_LOG_ROOT="${POINTERCAD_LOG_ROOT:-$REPO_ROOT/log}"
-CONFIG_PATH="${CONFIG_PATH:-$REPO_ROOT/config/rl_rollouts.yaml}"
 LOG_DIR="${LOG_DIR:-$POINTERCAD_LOG_ROOT/rl_rollouts}"
 PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
@@ -104,5 +154,5 @@ torchrun \
     --master-port "$MASTER_PORT" \
     -m preprocessing.generate_rl_rollouts \
     -c "$CONFIG_PATH" \
-    "$@" \
+    "${FORWARD_ARGS[@]}" \
     2>&1 | tee "$LOG_PATH"

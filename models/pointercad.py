@@ -65,7 +65,53 @@ class PointerCAD(nn.Module):
             self.parameter_tau.clamp_(max=self.parameter_tau_max)
             self.pointer_tau.clamp_(max=self.pointer_tau_max)
 
-    def forward(self, input_ids, attention_mask, breps, parameter_maps, labels=None, parameters=None, pointers=None, logits_to_keep=0, **kwargs):
+    def enable_gradient_checkpointing(self) -> None:
+        """Enable non-reentrant checkpointing on the Qwen decoder layers."""
+        get_base_model = getattr(self.model, "get_base_model", None)
+        checkpoint_model = (
+            get_base_model() if get_base_model is not None else self.model
+        )
+        enable = getattr(checkpoint_model, "gradient_checkpointing_enable", None)
+        if enable is None:
+            raise RuntimeError(
+                "The configured PEFT/Qwen model does not expose "
+                "gradient_checkpointing_enable()."
+            )
+        enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+
+    def _conditional_parameter_anchor(self, reference: torch.Tensor) -> torch.Tensor:
+        """Attach skipped conditional modules to DDP with zero gradients."""
+        anchor = reference.new_zeros(())
+        for module_name in (
+            "brep",
+            "parameter",
+            "parameter_projection",
+            "pointer_projection",
+        ):
+            module = getattr(self, module_name, None)
+            if module is None:
+                continue
+            for parameter in module.parameters():
+                if parameter.requires_grad and parameter.numel() > 0:
+                    anchor = anchor + (
+                        parameter.reshape(-1)[0].to(reference.dtype) * 0.0
+                    )
+        return anchor
+
+    def forward(
+        self,
+        input_ids,
+        attention_mask,
+        breps,
+        parameter_maps,
+        labels=None,
+        parameters=None,
+        pointers=None,
+        logits_to_keep=0,
+        lm_logits_mask=None,
+        ensure_conditional_parameter_usage=False,
+        **kwargs,
+    ):
         ##################  Build Brep Embeded  ##################
         text_embeds: torch.Tensor = self.model.get_input_embeddings()(input_ids)
 
@@ -218,14 +264,27 @@ class PointerCAD(nn.Module):
         hidden_states = hidden_states[:, slice_indices, :]
 
         shifted_lm_mask = torch.cat([lm_mask[:, 1:], ~(lm_mask[:, :1] == lm_mask[:, :1])], dim=1)[:, slice_indices]
-        lm_states = hidden_states[shifted_lm_mask]
-        num_lm_per_batch = shifted_lm_mask.sum(dim=1).tolist()
+        if lm_logits_mask is None:
+            lm_projection_mask = shifted_lm_mask
+        else:
+            if lm_logits_mask.shape != input_ids.shape:
+                raise ValueError(
+                    "lm_logits_mask must have the same shape as input_ids."
+                )
+            lm_logits_mask = lm_logits_mask[:, slice_indices].bool()
+            if torch.any(lm_logits_mask & ~shifted_lm_mask):
+                raise ValueError(
+                    "lm_logits_mask can select only positions that predict LM tokens."
+                )
+            lm_projection_mask = lm_logits_mask
+        lm_states = hidden_states[lm_projection_mask]
+        num_lm_per_batch = lm_projection_mask.sum(dim=1).tolist()
         pred_logits = self.lm_head(lm_states)
 
         # illegal token handling
         illegal_start_mask = torch.zeros_like(shifted_lm_mask, dtype=torch.bool)
         illegal_start_mask[:, 1:] = ((input_ids == 151671).cumsum(dim=1) > 0)[:, :-1]
-        illegal_start_mask = illegal_start_mask[shifted_lm_mask]
+        illegal_start_mask = illegal_start_mask[lm_projection_mask]
         illegal_end_mask = ~illegal_start_mask
         pred_logits[:, 151674:] = -1e9  # unknown token handling (151674 = len(tokenizer))
         pred_logits[:, 151673] = -1e9  # unsupport token (<|cad_pad|>) handling
@@ -240,7 +299,13 @@ class PointerCAD(nn.Module):
         pred_parameters = self.parameter_head(cad_states)
         pred_pointers = self.pointer_head(cad_states)
 
-        return torch.split(pred_logits, num_lm_per_batch), torch.split(pred_labels, num_cad_per_batch), torch.split(pred_parameters, num_cad_per_batch), torch.split(pred_pointers, num_cad_per_batch), param_embeds, self.parameter_tau.exp().clone(), pointer_crv, pointer_srf, self.pointer_tau.exp().clone(), self.standard_plane_pointer.clone()
+        parameter_tau = self.parameter_tau.exp().clone()
+        if ensure_conditional_parameter_usage:
+            parameter_tau = parameter_tau + self._conditional_parameter_anchor(
+                parameter_tau
+            )
+
+        return torch.split(pred_logits, num_lm_per_batch), torch.split(pred_labels, num_cad_per_batch), torch.split(pred_parameters, num_cad_per_batch), torch.split(pred_pointers, num_cad_per_batch), param_embeds, parameter_tau, pointer_crv, pointer_srf, self.pointer_tau.exp().clone(), self.standard_plane_pointer.clone()
 
     @torch.no_grad()
     def predict(

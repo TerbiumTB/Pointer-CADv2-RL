@@ -55,6 +55,46 @@ def load_yaml(path: str) -> Dict:
     return value
 
 
+def resolve_replay_lengths(model_config: Dict, rollout_root: str):
+    """Resolve exact-replay bounds from the persisted rollout runtime."""
+    rollout_config_path = Path(rollout_root) / "config.yaml"
+    rollout_config = load_yaml(str(rollout_config_path))
+    generation = rollout_config.get("generation")
+    if not isinstance(generation, dict):
+        raise ValueError(
+            f"Persisted rollout config {rollout_config_path} has no generation block."
+        )
+    rollout_input_length = int(generation.get("max_input_length", 3072))
+    rollout_generation_steps = int(
+        generation.get("max_generation_steps", 1024)
+    )
+    configured_input_length = int(
+        model_config.get("max_input_length", rollout_input_length)
+    )
+    if configured_input_length != rollout_input_length:
+        raise ValueError(
+            "Exact DPO replay must use the rollout input truncation: "
+            f"model.max_input_length={configured_input_length}, but "
+            f"{rollout_config_path} stores generation.max_input_length="
+            f"{rollout_input_length}."
+        )
+
+    required_replay_length = (
+        rollout_input_length + rollout_generation_steps
+    )
+    configured_replay_length = int(
+        model_config.get("max_replay_length", required_replay_length)
+    )
+    if configured_replay_length < required_replay_length:
+        raise ValueError(
+            "model.max_replay_length is too small for this rollout run: "
+            f"got {configured_replay_length}, need at least "
+            f"{required_replay_length} ({rollout_input_length} input + "
+            f"{rollout_generation_steps} generated positions)."
+        )
+    return configured_input_length, configured_replay_length
+
+
 def load_model_checkpoint(model, checkpoint_path: str) -> None:
     checkpoint_path = Path(checkpoint_path)
     logger.info(
@@ -84,9 +124,29 @@ def load_model_checkpoint(model, checkpoint_path: str) -> None:
     gc.collect()
 
 
-def set_deterministic_likelihood_mode(model) -> None:
-    """Disable dropout and running-stat updates without disabling gradients."""
+def set_deterministic_likelihood_mode(
+    model, gradient_checkpointing: bool = False
+) -> int:
+    """Disable stochastic layers while optionally checkpointing decoder layers."""
     model.eval()
+    if not gradient_checkpointing:
+        return 0
+    checkpoint_layers = 0
+    for module in model.modules():
+        if not getattr(module, "gradient_checkpointing", False):
+            continue
+        # Transformers' GradientCheckpointingLayer checks only its own
+        # `training` flag. Set that attribute directly so decoder layers
+        # checkpoint, while their attention/LoRA dropout children remain in
+        # deterministic eval mode.
+        module.training = True
+        checkpoint_layers += 1
+    if checkpoint_layers == 0:
+        raise RuntimeError(
+            "Gradient checkpointing was requested, but no checkpoint-enabled "
+            "decoder layers were found."
+        )
+    return checkpoint_layers
 
 
 def save_checkpoint(
@@ -227,6 +287,11 @@ def main() -> None:
         cuda_device_count,
         torch.cuda.get_device_properties(local_rank),
     )
+    if accelerator.num_processes > 1:
+        logger.info(
+            "DDP find_unused_parameters=False; skipped conditional PointerCAD "
+            "modules receive exact zero-gradient anchors."
+        )
     set_seed(int(training.get("seed", 0)), device_specific=True)
 
     reference_config = config["reference"]
@@ -263,6 +328,11 @@ def main() -> None:
         dtype=model_dtype,
     )
     load_model_checkpoint(policy, model_config["checkpoint_path"])
+    gradient_checkpointing = bool(
+        training.get("gradient_checkpointing", True)
+    )
+    if gradient_checkpointing:
+        policy.enable_gradient_checkpointing()
     policy.to(accelerator.device)
     gc.collect()
     logger.info("Policy weights loaded on {}", accelerator.device)
@@ -327,17 +397,31 @@ def main() -> None:
             evaluation_mode=True,
         )
         set_deterministic_likelihood_mode(reference_model)
-    set_deterministic_likelihood_mode(policy)
+    checkpoint_layer_count = set_deterministic_likelihood_mode(
+        policy, gradient_checkpointing=gradient_checkpointing
+    )
     logger.info(
         "DPO policy and reference likelihoods use eval mode to disable dropout "
-        "and BatchNorm running-stat updates; policy gradients remain enabled."
+        "and BatchNorm running-stat updates; policy gradients remain enabled. "
+        "Gradient checkpointing={} checkpointed_layers={}",
+        gradient_checkpointing,
+        checkpoint_layer_count,
     )
 
     temperatures = ScoringTemperatures(**config.get("scoring_temperatures", {}))
+    max_input_length, max_replay_length = resolve_replay_lengths(
+        model_config, config["dataset"]["rollout_root"]
+    )
+    logger.info(
+        "Exact replay lengths: max_input_length={} max_replay_length={}",
+        max_input_length,
+        max_replay_length,
+    )
     objective = PointerCADDPO(
         processor=processor,
         rollout_root=config["dataset"]["rollout_root"],
-        max_length=int(model_config.get("max_length", 3072)),
+        max_input_length=max_input_length,
+        max_replay_length=max_replay_length,
         beta=float(training["beta"]),
         label_smoothing=float(training.get("label_smoothing", 0.0)),
         temperatures=temperatures,
@@ -354,7 +438,9 @@ def main() -> None:
     optimizer.zero_grad()
 
     for epoch in range(int(training["num_epochs"])):
-        set_deterministic_likelihood_mode(policy)
+        set_deterministic_likelihood_mode(
+            policy, gradient_checkpointing=gradient_checkpointing
+        )
         for batch_index, pairs in enumerate(train_loader):
             with accelerator.accumulate(policy):
                 with accelerator.autocast():
@@ -363,6 +449,46 @@ def main() -> None:
                         pairs=pairs,
                         device=accelerator.device,
                     )
+                if epoch == 0 and batch_index == 0:
+                    initial_metrics = reduce_metrics(
+                        accelerator,
+                        {
+                            name: output.metrics[name]
+                            for name in (
+                                "loss",
+                                "preferred_reward",
+                                "rejected_reward",
+                                "reward_margin",
+                            )
+                        },
+                        len(pairs),
+                    )
+                    if accelerator.is_main_process:
+                        expected_loss = math.log(2.0)
+                        logger.info(
+                            "Initial reference alignment before optimizer update: "
+                            "loss={:.6f} expected_log2={:.6f} "
+                            "preferred_reward={:.6f} rejected_reward={:.6f} "
+                            "reward_margin={:.6f}",
+                            initial_metrics["loss"],
+                            expected_loss,
+                            initial_metrics["preferred_reward"],
+                            initial_metrics["rejected_reward"],
+                            initial_metrics["reward_margin"],
+                        )
+                        tolerance = float(
+                            training.get(
+                                "initial_reference_loss_tolerance", 0.05
+                            )
+                        )
+                        if abs(initial_metrics["loss"] - expected_loss) > tolerance:
+                            logger.warning(
+                                "Initial DPO loss differs from log(2) by more than "
+                                "{}; verify that policy and cached reference scores "
+                                "use the same checkpoint, temperatures and replay "
+                                "semantics.",
+                                tolerance,
+                            )
                 accelerator.backward(output.loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(policy.parameters(), max_grad_norm)

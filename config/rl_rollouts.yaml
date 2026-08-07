@@ -1,4 +1,4 @@
-run_id: "sft-05b-k5"
+run_id: "sft-05b-k3"
 generator_version: "rollout-generator-v4-vectorized-predict"
 
 episodes_root: "/home/terbium/datasets/paramcad-addon/small-15k/format/pointercad-rl/episodes"

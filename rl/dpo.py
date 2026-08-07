@@ -70,7 +70,8 @@ class PointerCADDPO:
         self,
         processor,
         rollout_root: str,
-        max_length: int,
+        max_replay_length: int,
+        max_input_length: int,
         beta: float,
         label_smoothing: float,
         temperatures: ScoringTemperatures,
@@ -78,7 +79,8 @@ class PointerCADDPO:
     ):
         self.processor = processor
         self.rollout_root = rollout_root
-        self.max_length = max_length
+        self.max_replay_length = max_replay_length
+        self.max_input_length = max_input_length
         self.beta = beta
         self.label_smoothing = label_smoothing
         self.temperatures = temperatures
@@ -115,7 +117,8 @@ class PointerCADDPO:
             completions=completions,
             rollout_root=self.rollout_root,
             device=device,
-            max_length=self.max_length,
+            max_replay_length=self.max_replay_length,
+            max_input_length=self.max_input_length,
             temperatures=self.temperatures,
         )
 

@@ -457,17 +457,42 @@ CPU mmap, а временный checkpoint state освобождается ср
 
 ### SFT evaluation
 
-Legacy evaluation остаётся доступным для SFT checkpoints. `scripts/test.sh`
-теперь является single-node launcher: он загружает корневой `.env`, запускает
-локальный `test_server.py`, создаёт по умолчанию один worker на каждую видимую
-GPU, вызывает `test.py` с общим output directory и затем строит `report.json`
-через `eval.py`. Config передаётся через `-c/--config`; число workers на GPU —
-через `-w/--workers-per-gpu` и по умолчанию равно одному.
+Предыдущий HTTP-coordinated evaluation сохранён как `test.old.py` и
+`scripts/test.old.sh`, а совместимый с ними config — как `config/test.old.yaml`.
+Legacy launcher явно вызывает `test.old.py` и остаётся доступным для
+воспроизведения старых запусков через `test_server.py`.
+
+Новые `test.py` и `scripts/test.sh` реализуют deterministic full-episode
+evaluation поверх архитектуры rollout-generator v4. Single-node launcher
+загружает корневой `.env` и запускает через `torchrun` один GPU coordinator на
+каждую видимую GPU. Каждый coordinator владеет изолированными `spawn` CPU
+workers, которые выполняют OpenCascade, строят B-Rep graph, считают geometry
+metrics и экспортируют файлы параллельно со следующими GPU batches. Decoding
+использует `argmax`; stochastic rollout sampling в evaluation не применяется.
+Параметры throughput задаются через `generation.batch_size`,
+`generation.cpu_workers_per_gpu` и `generation.batch_wait_seconds`. При CUDA
+OOM effective batch автоматически уменьшается, а allocator cache в обычном hot
+path не очищается.
+
+Evaluation использует лёгкий `episodes/<split>.parquet`, если он существует, и
+иначе строит эквивалентный model-level список непосредственно из исходного
+step-level split, не загружая SFT graph/vector/parameter records. Rendered
+prompts кэшируются, checkpoint загружается через CPU mmap, prediction/target
+mesh лениво строятся один раз и переиспользуются для метрик и STL export.
+Задачи распределяются по rank детерминированно через `task_id`; результаты
+сразу дописываются в rank-safe `results-r*.jsonl`. Прерванный run с тем же
+config и checkpoint SHA продолжается из этих shards, после чего rank 0 атомарно
+создаёт общий `results.json`, а launcher запускает `eval.py` для `report.json`.
+При несовпадении persisted config нужно использовать новый output directory.
 
 Исходный split остаётся step-level, но progressive evaluation выполняется на
 уровне полной модели: `test.py` выбирает последний `part_id` для каждого
 `(chunk, model_id)` перед генерацией. Один evaluation run использует один prompt
-variant, заданный как `dataset.prompt_variant` в `config/test.yaml`.
+variant, заданный как `dataset.prompt_variant` в `config/test.yaml`. Config также
+задаёт `dataset.split`, поэтому checkpoint selection можно выполнять на
+`validation`, а финальные метрики — отдельным запуском на `test`. Новый raw
+result сохраняет termination reason, per-metric errors, timings и generation
+counts; legacy поля CD/F1/watertightness остаются для совместимости с `eval.py`.
 
 ## Следующие шаги
 

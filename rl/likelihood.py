@@ -1,11 +1,12 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence
+from typing import List, Sequence, Tuple
 
 import dgl
 import torch
 import torch.nn.functional as F
 from dgl.data.utils import load_graphs
+from torch.utils.checkpoint import checkpoint
 
 from misc import STANDARD_PLANES, TOKEN
 from rl.dpo_data import DPOCompletion
@@ -14,6 +15,9 @@ POINTER_ENABLE_ID = TOKEN.index("<|pointer_enable|>")
 SKETCH_START_ID = TOKEN.index("<|sketch_start|>")
 LENGTH_VALUE_ID = TOKEN.index("<|length_value|>")
 ANGLE_VALUE_ID = TOKEN.index("<|angle_value|>")
+MODEL_END_ID = TOKEN.index("<|model_end|>")
+PART_END_ID = TOKEN.index("<|part_end|>")
+LM_LOG_PROB_CHUNK_SIZE = 8
 
 
 @dataclass(frozen=True)
@@ -72,16 +76,103 @@ def _prompt_message(prompt: str):
     return prompt_message(prompt)
 
 
-def _full_message(prompt: str, plan: str):
-    return _prompt_message(prompt) + [
-        {
-            "role": "assistant",
-            "content": [
-                {"type": "text", "text": plan},
-                {"type": "cad"},
-            ],
-        }
-    ]
+def _replay_completion_token_ids(
+    stored_lm_token_ids: Sequence[int],
+    num_cad_actions: int,
+    cad_start_id: int,
+    cad_pad_id: int,
+) -> List[int]:
+    """Restore the exact generated sequence, including structured CAD slots."""
+    token_ids = [int(token_id) for token_id in stored_lm_token_ids]
+    if num_cad_actions <= 0:
+        raise ValueError("A replay step must contain at least one CAD action.")
+    if token_ids.count(cad_start_id) != 1:
+        raise ValueError(
+            "Stored LM token IDs must contain exactly one <|cad_start|> token."
+        )
+    if cad_pad_id in token_ids:
+        raise ValueError(
+            "Stored LM token IDs unexpectedly contain <|cad_pad|>; rollout "
+            "records must store that structured channel separately."
+        )
+    cad_start_position = token_ids.index(cad_start_id)
+    return (
+        token_ids[: cad_start_position + 1]
+        + [cad_pad_id] * num_cad_actions
+        + token_ids[cad_start_position + 1 :]
+    )
+
+
+def _build_replay_token_batch(
+    prompt_input_ids: torch.Tensor,
+    prompt_attention_mask: torch.Tensor,
+    stored_lm_token_ids: Sequence[Sequence[int]],
+    cad_action_counts: Sequence[int],
+    cad_start_id: int,
+    cad_pad_id: int,
+    pad_token_id: int,
+    padding_side: str,
+    max_length: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Append exact rollout tokens to tokenized prompts and pad the batch."""
+    batch_size = prompt_input_ids.shape[0]
+    if not (
+        prompt_attention_mask.shape == prompt_input_ids.shape
+        and len(stored_lm_token_ids) == batch_size
+        and len(cad_action_counts) == batch_size
+    ):
+        raise ValueError("Replay prompts and stored trajectory steps are misaligned.")
+    if padding_side not in {"left", "right"}:
+        raise ValueError(f"Unsupported tokenizer padding side {padding_side!r}.")
+
+    rows: List[torch.Tensor] = []
+    for index in range(batch_size):
+        prompt_ids = prompt_input_ids[index][
+            prompt_attention_mask[index].bool()
+        ]
+        completion_ids = _replay_completion_token_ids(
+            stored_lm_token_ids[index],
+            cad_action_counts[index],
+            cad_start_id,
+            cad_pad_id,
+        )
+        completion = torch.tensor(
+            completion_ids,
+            dtype=prompt_input_ids.dtype,
+            device=prompt_input_ids.device,
+        )
+        row = torch.cat([prompt_ids, completion], dim=0)
+        if row.numel() > max_length:
+            raise ValueError(
+                "Exact trajectory replay requires "
+                f"{row.numel()} tokens, exceeding "
+                f"model.max_replay_length={max_length}. Increase "
+                "model.max_replay_length; truncating a stored trajectory would "
+                "change the DPO likelihood."
+            )
+        rows.append(row)
+
+    replay_length = max(row.numel() for row in rows)
+    input_ids = torch.full(
+        (batch_size, replay_length),
+        int(pad_token_id),
+        dtype=prompt_input_ids.dtype,
+        device=prompt_input_ids.device,
+    )
+    attention_mask = torch.zeros(
+        (batch_size, replay_length),
+        dtype=prompt_attention_mask.dtype,
+        device=prompt_attention_mask.device,
+    )
+    for index, row in enumerate(rows):
+        if padding_side == "left":
+            start = replay_length - row.numel()
+            input_ids[index, start:] = row
+            attention_mask[index, start:] = 1
+        else:
+            input_ids[index, : row.numel()] = row
+            attention_mask[index, : row.numel()] = 1
+    return input_ids, attention_mask
 
 
 def _parameter_map_to_tensors(parameter_map, device=None):
@@ -110,6 +201,86 @@ def _valid_lm_token_count(input_ids, attention_mask, special_ids) -> int:
     for token_id in special_ids:
         special_mask |= input_ids == token_id
     return int((~special_mask & attention_mask.bool()).sum().item())
+
+
+def _completion_lm_logit_mask(
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    prompt_lm_token_counts: Sequence[int],
+    special_ids,
+) -> torch.Tensor:
+    """Select hidden positions whose next LM token belongs to a completion."""
+    if input_ids.shape != attention_mask.shape:
+        raise ValueError("input_ids and attention_mask must have matching shapes.")
+    if input_ids.ndim != 2:
+        raise ValueError("Completion LM masking expects a rank-2 token batch.")
+    if len(prompt_lm_token_counts) != input_ids.shape[0]:
+        raise ValueError("Expected one prompt LM token count per batch item.")
+
+    lm_mask = torch.ones_like(input_ids, dtype=torch.bool)
+    for token_id in special_ids:
+        lm_mask &= input_ids != token_id
+    attended_lm_mask = lm_mask & attention_mask.bool()
+    valid_lm_rank = torch.cumsum(attended_lm_mask.long(), dim=1) - 1
+    prompt_counts = torch.tensor(
+        prompt_lm_token_counts,
+        dtype=valid_lm_rank.dtype,
+        device=valid_lm_rank.device,
+    ).unsqueeze(1)
+    completion_target_mask = attended_lm_mask & (valid_lm_rank >= prompt_counts)
+
+    # PointerCAD hidden state at position t predicts the LM token at t + 1.
+    result = torch.zeros_like(completion_target_mask)
+    result[:, :-1] = completion_target_mask[:, 1:]
+    return result
+
+
+def _selected_completion_lm_log_prob(
+    logits: torch.Tensor,
+    expected_token_ids: Sequence[int],
+    temperature: float,
+) -> torch.Tensor:
+    """Score logits already projected only at completion target positions."""
+    expected = [int(token_id) for token_id in expected_token_ids]
+    if logits.shape[0] != len(expected):
+        raise ValueError(
+            "Completion-only LM logits do not align with stored token IDs: "
+            f"model produced {logits.shape[0]}, rollout stores {len(expected)}."
+        )
+    if not expected:
+        raise ValueError("A replay step must contain at least one completion LM token.")
+    targets = torch.tensor(expected, dtype=torch.long, device=logits.device)
+    total_logp = torch.zeros((), dtype=torch.float32, device=logits.device)
+
+    def chunk_log_prob(chunk_logits, chunk_targets):
+        chunk_logits = chunk_logits.float()
+        if temperature != 1.0:
+            chunk_logits = chunk_logits / temperature
+        return -F.cross_entropy(
+            chunk_logits,
+            chunk_targets,
+            reduction="sum",
+        )
+
+    for start in range(0, targets.shape[0], LM_LOG_PROB_CHUNK_SIZE):
+        end = start + LM_LOG_PROB_CHUNK_SIZE
+        chunk_logits = logits[start:end]
+        chunk_targets = targets[start:end]
+        if torch.is_grad_enabled() and chunk_logits.requires_grad:
+            # Cross entropy saves a float32 [tokens, vocabulary] intermediate.
+            # Non-reentrant checkpointing discards it after forward and
+            # recomputes it during backward, while the small chunk bounds the
+            # temporary allocation in both passes.
+            chunk_value = checkpoint(
+                chunk_log_prob,
+                chunk_logits,
+                chunk_targets,
+                use_reentrant=False,
+            )
+        else:
+            chunk_value = chunk_log_prob(chunk_logits, chunk_targets)
+        total_logp = total_logp + chunk_value
+    return total_logp
 
 
 def _completion_lm_log_prob(
@@ -147,9 +318,17 @@ def _completion_lm_log_prob(
         raise ValueError(
             "Stored LM token IDs do not match the tokenized trajectory replay."
         )
-    token_logps = F.log_softmax(logits.float() / temperature, dim=-1)
-    selected = token_logps.gather(-1, targets.long().unsqueeze(-1)).squeeze(-1)
-    return selected[completion_mask].sum()
+    # Projecting PointerCAD hidden states already materializes a large
+    # [tokens, vocabulary] tensor. A full float32 log_softmax over prompt and
+    # completion tokens can add several GiB even though DPO only needs the
+    # sampled completion targets. Select those rows first and evaluate their
+    # NLL in bounded chunks. Cross entropy is exactly
+    # -log_softmax(logits)[target] without retaining the full FP32 matrix.
+    return _selected_completion_lm_log_prob(
+        logits=logits[completion_mask],
+        expected_token_ids=completion_targets.detach().cpu().tolist(),
+        temperature=temperature,
+    )
 
 
 def _candidate_log_prob(
@@ -188,18 +367,40 @@ def _structured_step_log_probs(
     pointer_tau,
     standard_plane_candidates,
     temperatures: ScoringTemperatures,
+    allow_trailing_prediction: bool = False,
+    step_description: str = "trajectory step",
 ):
-    if not (
-        pred_labels.shape[0]
-        == pred_parameters.shape[0]
-        == pred_pointers.shape[0]
-        == labels.shape[0]
-        == parameters.shape[0]
-        == pointers.shape[0]
-    ):
+    prediction_counts = {
+        pred_labels.shape[0],
+        pred_parameters.shape[0],
+        pred_pointers.shape[0],
+    }
+    stored_counts = {
+        labels.shape[0],
+        parameters.shape[0],
+        pointers.shape[0],
+    }
+    if len(prediction_counts) != 1 or len(stored_counts) != 1:
         raise ValueError(
-            "Stored structured actions do not align with model outputs. "
-            "The sequence may have been truncated."
+            f"Structured channels have inconsistent lengths for {step_description}: "
+            f"model={sorted(prediction_counts)}, stored={sorted(stored_counts)}."
+        )
+    prediction_count = next(iter(prediction_counts))
+    stored_count = next(iter(stored_counts))
+    if prediction_count == stored_count + 1 and allow_trailing_prediction:
+        # Generation can hit max_generation_steps immediately after a
+        # non-terminal CAD action. PointerCAD then exposes the distribution of
+        # the next action as its final state, but that action was never sampled
+        # and is not part of the stored trajectory likelihood.
+        pred_labels = pred_labels[:stored_count]
+        pred_parameters = pred_parameters[:stored_count]
+        pred_pointers = pred_pointers[:stored_count]
+        prediction_count = stored_count
+    if prediction_count != stored_count:
+        raise ValueError(
+            f"Stored structured actions do not align with model outputs for "
+            f"{step_description}: model produced {prediction_count}, rollout "
+            f"stores {stored_count}."
         )
 
     label_logps = F.log_softmax(
@@ -209,7 +410,14 @@ def _structured_step_log_probs(
         -1, labels.long().unsqueeze(-1)
     ).squeeze(-1).sum()
     parameter_total = pred_parameters.sum() * 0.0
+    for candidates in parameter_candidates.values():
+        parameter_total = parameter_total + candidates.sum() * 0.0
+    parameter_total = parameter_total + parameter_tau.sum() * 0.0
     pointer_total = pred_pointers.sum() * 0.0
+    pointer_total = pointer_total + curve_candidates.sum() * 0.0
+    pointer_total = pointer_total + surface_candidates.sum() * 0.0
+    pointer_total = pointer_total + standard_plane_candidates.sum() * 0.0
+    pointer_total = pointer_total + pointer_tau.sum() * 0.0
     plane_count = len(STANDARD_PLANES)
 
     for action_index, label_tensor in enumerate(labels):
@@ -265,8 +473,9 @@ def score_trajectories(
     completions: Sequence[DPOCompletion],
     rollout_root: str,
     device,
-    max_length: int,
+    max_replay_length: int,
     temperatures: ScoringTemperatures,
+    max_input_length: int = 3072,
 ) -> TrajectoryLogProbs:
     """Score variable-length episodes in a single batched model forward."""
     temperatures.validate()
@@ -289,21 +498,16 @@ def score_trajectories(
     prompt_messages = [
         _prompt_message(completion.prompt) for completion, _ in flat_steps
     ]
-    full_messages = [
-        _full_message(completion.prompt, step.plan_text)
-        for completion, step in flat_steps
-    ]
     prompt_text = processor.apply_chat_template(
         prompt_messages, tokenize=False, add_generation_prompt=True
-    )
-    full_text = processor.apply_chat_template(
-        full_messages, tokenize=False, add_generation_prompt=False
     )
 
     prompt_inputs = processor(
         text=prompt_text,
         breps=graph_batch,
-        max_length=max_length,
+        # Match rollout generation exactly. The generated completion is
+        # appended only after this input-side truncation.
+        max_length=max_input_length,
     )
     special_ids = _special_token_ids(processor)
     prompt_lm_counts = [
@@ -326,15 +530,43 @@ def score_trajectories(
         _parameter_map_to_tensors(step.parameter_map)
         for _, step in flat_steps
     ]
-    model_inputs = processor(
-        text=full_text,
-        breps=graph_batch,
-        parameter_maps=parameter_maps,
-        labels=labels,
-        parameters=parameters,
-        pointers=pointers,
-        max_length=max_length,
-    ).to(device)
+    tokenizer = processor.tokenizer
+    cad_start_id = tokenizer.convert_tokens_to_ids("<|cad_start|>")
+    cad_pad_id = tokenizer.convert_tokens_to_ids(processor.cad_token)
+    pad_token_id = tokenizer.pad_token_id
+    if pad_token_id is None:
+        raise ValueError("Exact trajectory replay requires a tokenizer pad token.")
+    replay_input_ids, replay_attention_mask = _build_replay_token_batch(
+        prompt_input_ids=prompt_inputs["input_ids"],
+        prompt_attention_mask=prompt_inputs["attention_mask"],
+        stored_lm_token_ids=[
+            step.plan_token_ids for _, step in flat_steps
+        ],
+        cad_action_counts=[len(step.labels) for _, step in flat_steps],
+        cad_start_id=cad_start_id,
+        cad_pad_id=cad_pad_id,
+        pad_token_id=pad_token_id,
+        padding_side=tokenizer.padding_side,
+        max_length=max_replay_length,
+    )
+    model_inputs = prompt_inputs
+    model_inputs["input_ids"] = replay_input_ids
+    model_inputs["attention_mask"] = replay_attention_mask
+    model_inputs["parameter_maps"] = parameter_maps
+    model_inputs["labels"] = labels
+    model_inputs["parameters"] = parameters
+    model_inputs["pointers"] = pointers
+    model_inputs["lm_logits_mask"] = _completion_lm_logit_mask(
+        replay_input_ids,
+        replay_attention_mask,
+        prompt_lm_counts,
+        special_ids,
+    )
+    # DPO disables DDP's find_unused_parameters traversal to avoid _DDPSink
+    # cloning large model outputs. Conditional modules that a particular replay
+    # batch skips are instead attached to the loss with exact zero gradients.
+    model_inputs["ensure_conditional_parameter_usage"] = True
+    model_inputs = model_inputs.to(device)
 
     outputs = model(**model_inputs)
     (
@@ -355,16 +587,19 @@ def score_trajectories(
     step_parameter = []
     step_pointer = []
     for index in range(len(flat_steps)):
+        completion, step = flat_steps[index]
         step_plan.append(
-            _completion_lm_log_prob(
-                pred_logits[index],
-                model_inputs["input_ids"][index],
-                model_inputs["attention_mask"][index],
-                prompt_lm_counts[index],
-                special_ids,
-                temperatures.plan,
-                flat_steps[index][1].plan_token_ids,
+            _selected_completion_lm_log_prob(
+                logits=pred_logits[index],
+                expected_token_ids=step.plan_token_ids,
+                temperature=temperatures.plan,
             )
+        )
+        truncated_inside_cad = (
+            bool(step.plan_token_ids)
+            and step.plan_token_ids[-1] == cad_start_id
+            and bool(step.labels)
+            and step.labels[-1] not in {MODEL_END_ID, PART_END_ID}
         )
         label_logp, parameter_logp, pointer_logp = (
             _structured_step_log_probs(
@@ -381,6 +616,11 @@ def score_trajectories(
                 pointer_tau,
                 standard_plane_candidates,
                 temperatures,
+                allow_trailing_prediction=truncated_inside_cad,
+                step_description=(
+                    f"trajectory {completion.trajectory_id!r}, "
+                    f"step {step.step_index}"
+                ),
             )
         )
         step_label.append(label_logp)
