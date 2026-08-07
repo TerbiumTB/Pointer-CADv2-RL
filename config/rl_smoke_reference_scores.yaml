@@ -1,0 +1,9 @@
+rollout_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/rollouts/sft-05b-k3"
+
+# Leave null to read runtime.checkpoint_sha256 from the rollout run config.
+# If set explicitly, it must match the persisted rollout SHA256 exactly.
+checkpoint_hash: null
+
+# Scores are appended atomically and existing (trajectory, checkpoint) entries
+# are skipped, so an interrupted builder can be rerun safely.
+write_shard_size: 4096

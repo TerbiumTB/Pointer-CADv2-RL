@@ -1,10 +1,10 @@
 run_id: "sft-05b-k3"
 generator_version: "rollout-generator-v4-vectorized-predict"
 
-episodes_root: "/home/terbium/datasets/paramcad-addon/small-15k/format/pointercad-rl/episodes"
-source_dataset_root: "/mnt/afs_01e/mayi-folder/ParamCAD/dataset/paramcad-addon/dataset"
-output_root: "/home/terbium/datasets/paramcad-addon/small-15k/format/pointercad-rl/rollouts"
-
+# smoke
+episodes_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/episodes"
+source_dataset_root: "/home/terbium/datasets/paramcad-addon/smoke/dataset"
+output_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/rollouts"
 
 splits:
   - train
@@ -22,8 +22,8 @@ generation:
   # GPU actions are generated together across independent active trajectories.
   # Keep more CPU workers than batch slots so CAD execution/metrics can overlap
   # the next GPU batch.
-  batch_size: 16
-  cpu_workers_per_gpu: 16
+  batch_size: 2
+  cpu_workers_per_gpu: 2
   batch_wait_seconds: 0.2
   max_episode_steps: 64
   max_generation_steps: 1024

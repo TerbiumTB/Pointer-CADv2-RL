@@ -1,0 +1,21 @@
+model:
+  base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+
+dataset:
+  dataset_dir: "/home/terbium/datasets/paramcad-addon/small-15k/dataset"
+  split_filepath: "/home/terbium/datasets/paramcad-addon/small-15k/train_val_test.json"
+  prompt_variant: "exp"
+  max_seq_len: 512
+
+test:
+  num_workers: 1
+  batch_size: 1
+  prefetch_factor: 1
+  checkpoint_path: "/home/terbium/PointerCADv2-RL/log/dpo/20260806_191518/model_step_00001150.pth"
+  log_dir: "./log"
+
+  # Для расчёта метрик экспорты не нужны.
+  save_stl: false
+  save_step: false
+
+info: "small-15k DPO test evaluation"

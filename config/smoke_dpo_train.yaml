@@ -1,23 +1,20 @@
 model:
   base_model: "Qwen/Qwen2.5-0.5B-Instruct"
   checkpoint_path: "/home/terbium/PointerCADv2-RL/log/sft-checkpoints/addon-0.5B-model.pth"
-  max_input_length: 3072
-  # Rollout input plus up to generation.max_generation_steps=1024 positions.
-  max_replay_length: 4096
+  max_length: 3072
   device: "cuda"
   dtype: "bfloat16"
 
 dataset:
-  episodes_root: "/home/terbium/datasets/paramcad-addon/small-15k/format/pointercad-rl/episodes"
-  rollout_root: "/home/terbium/datasets/paramcad-addon/small-15k/format/pointercad-rl/rollouts/sft-05b-k3"
-  preferences_root: "/home/terbium/datasets/paramcad-addon/small-15k/format/pointercad-rl/preferences/geometry-v1"
+  episodes_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/episodes"
+  rollout_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/rollouts/sft-05b-k3"
+  preferences_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/preferences/geometry-v1"
 
 
 # "model" keeps a frozen SFT copy in memory. "cached" reads total_logp from
 # rollouts/scores for checkpoint_hash and avoids loading a reference model.
 reference:
   mode: "cached"
-  checkpoint_path: "/home/terbium/PointerCADv2-RL/log/sft-checkpoints/addon-0.5B-model.pth"
   checkpoint_hash: "0791915e6c1a3bd9273f8e8f836a61b1ffbdd22b2c7ff8d51f294f63aa2282f7"
 
 # training:
@@ -44,9 +41,9 @@ reference:
 # smoke
 training:
   output_dir: "./log/dpo"
-  num_epochs: 10
+  num_epochs: 2
   batch_size: 1
-  gradient_accumulation_steps: 16
+  gradient_accumulation_steps: 1
   learning_rate: 1.0e-5
   tau_learning_rate: 1.0e-6
   weight_decay: 0.01
@@ -59,8 +56,8 @@ training:
   prefetch_factor: 2
   pin_memory: false
   seed: 0
-  log_interval: 10
-  checkpoint_interval: 100
+  log_interval: 1
+  checkpoint_interval: 2
   validation_interval: 1
 
 # DPO scores the underlying model policy, not rollout sampling distributions.

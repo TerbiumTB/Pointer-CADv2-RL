@@ -1,9 +1,6 @@
-# Deterministic full-episode evaluation. One torchrun rank owns each visible
-# GPU; isolated CPU workers execute OpenCascade and geometry metrics.
-
 model:
   base_model: "Qwen/Qwen2.5-0.5B-Instruct"
-  checkpoint_path: "/home/terbium/PointerCADv2-RL/log/sft-checkpoints/addon-0.5B-model.pth"
+  checkpoint_path: "/home/terbium/PointerCADv2-RL/log/dpo/20260806_191518/model_step_00001150.pth"
   dtype: "bfloat16"
 
 dataset:
@@ -44,7 +41,6 @@ metrics:
   chamfer_points: 8192
 
 outputs:
-  # Meshes are built lazily and reused across CD, watertightness, and STL export.
   save_step: false
   save_stl: false
   save_ground_truth: false

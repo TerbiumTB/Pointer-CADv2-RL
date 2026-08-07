@@ -1,21 +1,36 @@
-# Legacy config for test.old.py and scripts/test.old.sh.
-
+ # ---------------------------------------------------------------------------- #
+ #                      Config for PointerCAD Model Training                      #
+ # ---------------------------------------------------------------------------- #
+ 
+ 
+ 
+ # ---------------------- Configuration for Model ---------------------- #
 model:
   base_model: "Qwen/Qwen2.5-0.5B-Instruct"
 
+
+# --------------- Configuration related to training dataloader --------------- #
 dataset:
+  # Root directory of the dataset
   dataset_dir: "/home/terbium/datasets/paramcad-addon/smoke"
+  # JSON file containing information about train, test, and validation splits
   split_filepath: "/home/terbium/datasets/paramcad-addon/smoke/train_val_test.json"
+  # Progressive evaluation currently evaluates one prompt variant per CAD model.
   prompt_variant: "exp"
+  # Maximum sequence length for input data
   max_seq_len: 512
 
+
+# ------------------------- Test configuration ------------------------- #
 test:
   num_workers: 1
   batch_size: 1
   prefetch_factor: 1
   checkpoint_path: "/home/terbium/PointerCADv2-RL/log/sft-checkpoints/addon-0.5B-model.pth"
   log_dir: "./log"
-  save_stl: true
-  save_step: true
+  save_stl: True
+  save_step: True
 
-info: "legacy test"
+
+# --------------- Additional information (leave empty for now) --------------- #
+info: "test"

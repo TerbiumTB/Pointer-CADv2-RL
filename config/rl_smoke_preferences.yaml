@@ -1,6 +1,6 @@
-episodes_root: "/home/terbium/datasets/paramcad-addon/small-15k/format/pointercad-rl/episodes"
-rollout_root: "/home/terbium/datasets/paramcad-addon/small-15k/format/pointercad-rl/rollouts/sft-05b-k3"
-output_root: "/home/terbium/datasets/paramcad-addon/small-15k/format/pointercad-rl/preferences/geometry-v1"
+episodes_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/episodes"
+rollout_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/rollouts/sft-05b-k3"
+output_root: "/home/terbium/datasets/paramcad-addon/smoke/format/rl/preferences/geometry-v1"
 
 reward:
   version: "geometry-v1"
